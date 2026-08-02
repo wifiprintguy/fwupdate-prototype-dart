@@ -1,0 +1,559 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:fwupdate/fwupdate.dart';
+import 'package:ipp/ipp.dart';
+
+import 'firmware_state_machine.dart';
+import 'simulation_config.dart';
+import 'transaction_log_entry.dart';
+
+/// The Printer app's live state and IPP request dispatcher, in one
+/// [ChangeNotifier] the UI can listen to directly.
+///
+/// This is the simulated Printer described in the project README: it
+/// implements Get-Printer-Attributes plus the two FWUPDATE operations, and
+/// its behavior is entirely driven by [config] (settable live from the
+/// Simulation Control screen) rather than any real firmware/repository.
+///
+/// Autonomous behavior (§4.6): when [SimulationConfig.policy] is
+/// [NewFirmwarePolicy.auto] and a discovery run finds new Firmware, this
+/// engine starts the install pipeline itself, without waiting for an
+/// Update-Printer-Firmware request — matching what the "policy" attribute
+/// is supposed to mean. The other three policy keywords are reported
+/// truthfully via `printer-new-firmware-policy-configured` but don't
+/// trigger autonomous phases in this prototype (see README "Milestones" —
+/// full policy-driven autonomy for `check`/`directed`/`download` is a
+/// possible future refinement, not required to validate a Client's
+/// Triggered Autonomous Firmware Update handling, which is the model this
+/// project targets per FWUPDATE §4.1.3).
+class PrinterEngine extends ChangeNotifier {
+  PrinterEngine({this.printerName = 'FWUPDATE Sim Printer', SimulationConfig? config}) {
+    _config = config ?? const SimulationConfig();
+    _stateMachine = FirmwareStateMachine(this);
+  }
+
+  final String printerName;
+
+  /// The IPP server this engine is wired to, so the Recovery/Activation
+  /// mid-update-outage simulation can actually drop connections at the
+  /// socket level. Set by the app's bootstrap code after both are created.
+  IppServer? server;
+
+  late final FirmwareStateMachine _stateMachine;
+
+  SimulationConfig _config = const SimulationConfig();
+  SimulationConfig get config => _config;
+
+  /// Replaces the simulation config and immediately re-evaluates discovery
+  /// (rather than waiting for a Client to ask) so the Simulation Control
+  /// screen gives instant feedback when the tester flips a toggle.
+  void updateConfig(SimulationConfig Function(SimulationConfig current) update) {
+    _config = update(_config);
+    if (!_stateMachine.isRunning) {
+      _performDiscovery();
+    }
+    notifyListeners();
+  }
+
+  void replaceConfig(SimulationConfig newConfig) {
+    _config = newConfig;
+    if (!_stateMachine.isRunning) {
+      _performDiscovery();
+    }
+    notifyListeners();
+  }
+
+  // --- Installed firmware (the "current", not "new", firmware) ---------
+
+  String currentFirmwareVersion = '1.0.0';
+  Uri? currentFirmwareInfoUri = Uri.parse('https://example.com/fw-sim/release-notes/1.0.0');
+
+  // --- Device clock -------------------------------------------------------
+
+  /// Whether the simulated device clock is set. When false,
+  /// `printer-new-firmware-check-date-time` always reports `unknown`, per
+  /// FWUPDATE §6.3.2's note about `printer-current-time` being unset.
+  bool clockSet = true;
+
+  void setClockSet(bool value) {
+    clockSet = value;
+    notifyListeners();
+  }
+
+  // --- printer-state / printer-state-reasons ------------------------------
+
+  int printerState = 3; // idle, per [STD92]
+  bool isAcceptingJobs = true;
+  final Set<String> _stateReasons = {};
+  Set<String> get stateReasons => Set.unmodifiable(_stateReasons);
+
+  FwPhase? currentPhase;
+
+  // --- New-firmware status --------------------------------------------
+
+  DateTime? checkDateTime;
+  FirmwareInfo? _newFirmware;
+  IppValue _newFirmwareOutOfBand = const IppNoValue();
+
+  FirmwareInfo? get newFirmware => _newFirmware;
+  FwOutOfBandState get newFirmwareOutOfBandState => _newFirmware != null
+      ? FwOutOfBandState.none
+      : (_newFirmwareOutOfBand is IppUnknown
+            ? FwOutOfBandState.unknown
+            : FwOutOfBandState.neverChecked);
+
+  String? delayedUntilKeyword;
+  DateTime? delayedUntilDateTime;
+  Timer? _delayTimer;
+  int _discoveryRunId = 0;
+
+  // --- Request log ----------------------------------------------------
+
+  final List<TransactionLogEntry> _requestLog = [];
+  List<TransactionLogEntry> get requestLog => List.unmodifiable(_requestLog);
+  static const int _maxLogEntries = 200;
+
+  void clearRequestLog() {
+    _requestLog.clear();
+    notifyListeners();
+  }
+
+  /// Resets to the state of a freshly booted Printer that has never checked
+  /// for Firmware — the natural representation of the "Never checked"
+  /// scenario preset (see FWUPDATE §6.3's `no-value` out-of-band wording).
+  void resetToNeverChecked() {
+    _delayTimer?.cancel();
+    _delayTimer = null;
+    _discoveryRunId++;
+    _stateMachine.cancel();
+    checkDateTime = null;
+    _newFirmware = null;
+    _newFirmwareOutOfBand = const IppNoValue();
+    _stateReasons.clear();
+    printerState = 3;
+    isAcceptingJobs = true;
+    delayedUntilKeyword = null;
+    delayedUntilDateTime = null;
+    currentPhase = null;
+    server?.setSimulateUnreachable(false);
+    notifyListeners();
+  }
+
+  // ==================================================================
+  // IPP request dispatch
+  // ==================================================================
+
+  Future<IppMessage> handleRequest(IppMessage request, HttpRequest httpRequest) async {
+    final response = switch (request.operationId) {
+      IppOperationId.getPrinterAttributes => _handleGetPrinterAttributes(request),
+      IppOperationId.checkForNewPrinterFirmware =>
+        _handleCheckForNewPrinterFirmware(request, httpRequest),
+      IppOperationId.updatePrinterFirmware =>
+        _handleUpdatePrinterFirmware(request, httpRequest),
+      _ => IppMessage.statusResponse(
+        statusCode: IppStatusCode.serverErrorOperationNotSupported,
+        requestId: request.requestId,
+      ),
+    };
+    _logTransaction(request, response, httpRequest);
+    return response;
+  }
+
+  void _logTransaction(IppMessage request, IppMessage response, HttpRequest httpRequest) {
+    _requestLog.insert(
+      0,
+      TransactionLogEntry(
+        timestamp: DateTime.now(),
+        remoteAddress: httpRequest.connectionInfo?.remoteAddress.address ?? 'unknown',
+        request: request,
+        response: response,
+      ),
+    );
+    while (_requestLog.length > _maxLogEntries) {
+      _requestLog.removeLast();
+    }
+    notifyListeners();
+  }
+
+  /// Returns the rejection status code for [httpRequest] given
+  /// [SimulationConfig.authEnforcement], or `null` if the request is
+  /// allowed to proceed. Mirrors FWUPDATE §5.1/§5.2's authorization
+  /// requirement.
+  int? _checkAuth(HttpRequest httpRequest) {
+    switch (config.authEnforcement) {
+      case AuthEnforcement.off:
+        return null;
+      case AuthEnforcement.forceForbidden:
+        return IppStatusCode.clientErrorForbidden;
+      case AuthEnforcement.byRole:
+        final role = _roleFromRequest(httpRequest);
+        return role.isAuthorizedForFirmwareOperations ? null : role.rejectionStatusCode;
+    }
+  }
+
+  SimulatedRole _roleFromRequest(HttpRequest httpRequest) {
+    final header = httpRequest.headers.value(HttpHeaders.authorizationHeader);
+    if (header == null || !header.startsWith('Basic ')) {
+      return SimulatedRole.unauthenticated;
+    }
+    try {
+      final decoded = utf8.decode(base64.decode(header.substring(6)));
+      final separatorIndex = decoded.indexOf(':');
+      final password = separatorIndex >= 0 ? decoded.substring(separatorIndex + 1) : '';
+      return switch (password) {
+        'administrator' => SimulatedRole.administrator,
+        'operator' => SimulatedRole.operator,
+        'end-user' => SimulatedRole.endUser,
+        _ => SimulatedRole.unauthenticated,
+      };
+    } on FormatException {
+      return SimulatedRole.unauthenticated;
+    }
+  }
+
+  IppMessage _handleGetPrinterAttributes(IppMessage request) {
+    return IppMessage.statusResponse(
+      statusCode: IppStatusCode.successfulOk,
+      requestId: request.requestId,
+      printerAttributes: _buildFullPrinterAttributes(),
+    );
+  }
+
+  IppMessage _handleCheckForNewPrinterFirmware(IppMessage request, HttpRequest httpRequest) {
+    final requestId = request.requestId;
+    if (!config.operations.checkForNewPrinterFirmware) {
+      return IppMessage.statusResponse(
+        statusCode: IppStatusCode.serverErrorOperationNotSupported,
+        requestId: requestId,
+        statusMessage: 'Check-For-New-Printer-Firmware is disabled on this simulated Printer',
+      );
+    }
+    final authRejection = _checkAuth(httpRequest);
+    if (authRejection != null) {
+      return IppMessage.statusResponse(statusCode: authRejection, requestId: requestId);
+    }
+
+    // Per §5.1: "The Printer responds immediately before completing the
+    // check" — the response below reflects the *current* cached values;
+    // the actual (re-)discovery happens after `discoveryDelay`.
+    final responseAttributes = [
+      IppAttribute.single(FwStatusAttr.newFirmwareCheckDateTime, _checkDateTimeValue()),
+      ..._newFirmwareDataAttributes(),
+    ];
+    _scheduleDiscovery();
+
+    return IppMessage.statusResponse(
+      statusCode: IppStatusCode.successfulOk,
+      requestId: requestId,
+      printerAttributes: responseAttributes,
+    );
+  }
+
+  IppMessage _handleUpdatePrinterFirmware(IppMessage request, HttpRequest httpRequest) {
+    final requestId = request.requestId;
+    if (!config.operations.updatePrinterFirmware) {
+      return IppMessage.statusResponse(
+        statusCode: IppStatusCode.serverErrorOperationNotSupported,
+        requestId: requestId,
+        statusMessage: 'Update-Printer-Firmware is disabled on this simulated Printer',
+      );
+    }
+    final authRejection = _checkAuth(httpRequest);
+    if (authRejection != null) {
+      return IppMessage.statusResponse(statusCode: authRejection, requestId: requestId);
+    }
+
+    final op = request.operationAttributes;
+    final delayKeywordAttr = op[FwOperationAttr.delayUpdateUntil];
+    final delayDateTimeAttr = op[FwOperationAttr.delayUpdateUntilDateTime];
+
+    if (delayKeywordAttr != null && delayDateTimeAttr != null) {
+      // FWUPDATE §4.4: a Client "MUST NOT supply both".
+      return IppMessage.statusResponse(
+        statusCode: IppStatusCode.clientErrorConflictingAttributes,
+        requestId: requestId,
+        statusMessage:
+            'delay-update-until and delay-update-until-date-time are mutually exclusive',
+      );
+    }
+
+    if (_newFirmware == null) {
+      // Nothing to install; per §5.2 this is still a successful no-op.
+      return IppMessage.statusResponse(
+        statusCode: IppStatusCode.successfulOk,
+        requestId: requestId,
+        statusMessage: 'No new Firmware is currently available to install',
+      );
+    }
+
+    final delayKeyword = delayKeywordAttr != null && !delayKeywordAttr.isOutOfBand
+        ? delayKeywordAttr.value.toString()
+        : null;
+
+    if (delayKeyword != null && delayKeyword == config.rejectedDelayUpdateUntilValue) {
+      return IppMessage.statusResponse(
+        statusCode: IppStatusCode.successfulOkIgnoredOrSubstitutedAttributes,
+        requestId: requestId,
+        statusMessage: '"$delayKeyword" is not a supported delay-update-until value here',
+        unsupportedAttributes: [
+          IppAttribute.single(FwOperationAttr.delayUpdateUntil, const IppUnsupported()),
+        ],
+      );
+    }
+
+    _delayTimer?.cancel();
+    _stateReasons.remove(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
+
+    if (delayDateTimeAttr != null && !delayDateTimeAttr.isOutOfBand) {
+      final target = (delayDateTimeAttr.value as IppDateTime).toDateTimeUtc();
+      final wait = target.difference(DateTime.now().toUtc());
+      delayedUntilDateTime = target;
+      delayedUntilKeyword = null;
+      if (wait > Duration.zero) {
+        _stateReasons.add(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
+        _delayTimer = Timer(wait, _beginPipelineFromDelay);
+      } else {
+        _beginPipelineFromDelay();
+      }
+    } else if (delayKeyword != null && delayKeyword != DelayUpdateUntil.noDelay) {
+      delayedUntilKeyword = delayKeyword;
+      delayedUntilDateTime = null;
+      final demoDelay = _demoDelayFor(delayKeyword);
+      _stateReasons.add(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
+      if (demoDelay != null) {
+        _delayTimer = Timer(demoDelay, _beginPipelineFromDelay);
+      }
+      // `indefinite` (demoDelay == null): stays pending until a future
+      // Update-Printer-Firmware request supersedes it.
+    } else {
+      delayedUntilKeyword = null;
+      delayedUntilDateTime = null;
+      _beginPipelineFromDelay();
+    }
+
+    notifyListeners();
+
+    return IppMessage.statusResponse(
+      statusCode: IppStatusCode.successfulOk,
+      requestId: requestId,
+      printerAttributes: [
+        if (delayedUntilKeyword != null)
+          IppAttribute.single(
+            FwStatusAttr.newFirmwareDelayedUntil,
+            IppKeyword(delayedUntilKeyword!),
+          ),
+        if (delayedUntilDateTime != null)
+          IppAttribute.single(
+            FwStatusAttr.newFirmwareDelayedUntilDateTime,
+            IppDateTime.fromDateTimeUtc(delayedUntilDateTime!),
+          ),
+      ],
+    );
+  }
+
+  /// A short, demo-friendly stand-in for each [DelayUpdateUntil] keyword's
+  /// real-world meaning ("evening", "the weekend", ...) — long enough to be
+  /// observably a delay, short enough to actually watch happen. Returns
+  /// `null` for `indefinite`, which has no scheduled end.
+  Duration? _demoDelayFor(String keyword) => switch (keyword) {
+    DelayUpdateUntil.dayTime => const Duration(seconds: 10),
+    DelayUpdateUntil.evening => const Duration(seconds: 15),
+    DelayUpdateUntil.night => const Duration(seconds: 20),
+    DelayUpdateUntil.secondShift => const Duration(seconds: 15),
+    DelayUpdateUntil.thirdShift => const Duration(seconds: 20),
+    DelayUpdateUntil.weekend => const Duration(seconds: 30),
+    _ => null,
+  };
+
+  void _beginPipelineFromDelay() {
+    delayedUntilKeyword = null;
+    delayedUntilDateTime = null;
+    _stateReasons.remove(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
+    unawaited(_stateMachine.run());
+    notifyListeners();
+  }
+
+  void _scheduleDiscovery() {
+    final myRun = ++_discoveryRunId;
+    Future.delayed(config.discoveryDelay, () {
+      if (myRun != _discoveryRunId) return;
+      _performDiscovery();
+    });
+  }
+
+  void _performDiscovery() {
+    checkDateTime = DateTime.now().toUtc();
+    _stateReasons
+      ..remove(FwStateReason.newFirmwareAvailable)
+      ..remove(FwStateReason.firmwareRepositoryUnreachable)
+      ..remove(FwStateReason.firmwareRepositoryAccessError);
+
+    switch (config.repositoryState) {
+      case RepositoryState.unreachable:
+        _stateReasons.add(FwStateReason.firmwareRepositoryUnreachable);
+        _newFirmware = null;
+        _newFirmwareOutOfBand = const IppUnknown();
+      case RepositoryState.accessError:
+        _stateReasons.add(FwStateReason.firmwareRepositoryAccessError);
+        _newFirmware = null;
+        _newFirmwareOutOfBand = const IppUnknown();
+      case RepositoryState.reachable:
+        if (config.firmwareAvailable && config.firmwareInfo != null) {
+          _newFirmware = config.firmwareInfo;
+          _newFirmwareOutOfBand = const IppNoValue();
+          _stateReasons.add(FwStateReason.newFirmwareAvailable);
+          if (config.policy == NewFirmwarePolicy.auto && !_stateMachine.isRunning) {
+            unawaited(_stateMachine.run());
+          }
+        } else {
+          _newFirmware = null;
+          _newFirmwareOutOfBand = const IppNoValue();
+        }
+    }
+    notifyListeners();
+  }
+
+  IppValue _checkDateTimeValue() {
+    if (checkDateTime == null) return const IppNoValue();
+    if (!clockSet) return const IppUnknown();
+    return IppDateTime.fromDateTimeUtc(checkDateTime!);
+  }
+
+  List<IppAttribute> _newFirmwareDataAttributes() {
+    final info = _newFirmware;
+    if (info != null) return info.toAttributes();
+    return buildOutOfBandFirmwareDataAttributes(_newFirmwareOutOfBand);
+  }
+
+  List<IppAttribute> _buildFullPrinterAttributes() {
+    final reasons = _stateReasons.isEmpty ? const ['none'] : _stateReasons.toList();
+    final supportedOps = [
+      const IppEnum(IppOperationId.getPrinterAttributes),
+      if (config.operations.checkForNewPrinterFirmware)
+        const IppEnum(IppOperationId.checkForNewPrinterFirmware),
+      if (config.operations.updatePrinterFirmware)
+        const IppEnum(IppOperationId.updatePrinterFirmware),
+    ];
+
+    return [
+      IppAttribute.single('printer-name', IppName(printerName)),
+      IppAttribute.single('printer-state', IppEnum(printerState)),
+      IppAttribute('printer-state-reasons', reasons.map(IppKeyword.new).toList()),
+      IppAttribute.single('printer-is-accepting-jobs', IppBoolean(isAcceptingJobs)),
+      IppAttribute('operations-supported', supportedOps),
+      IppAttribute.single('ipp-features-supported', const IppKeyword(ippFeatureFwupdate)),
+      IppAttribute.single(
+        FwStatusAttr.firmwareInfoUri,
+        IppUri((currentFirmwareInfoUri ?? Uri.parse('https://example.com')).toString()),
+      ),
+      IppAttribute.single('printer-firmware-string-version', IppText(currentFirmwareVersion)),
+      IppAttribute(
+        FwDescriptionAttr.delayUpdateUntilSupported,
+        DelayUpdateUntil.all.map(IppKeyword.new).toList(),
+      ),
+      IppAttribute.single(FwDescriptionAttr.newFirmwarePolicyConfigured, IppKeyword(config.policy)),
+      IppAttribute(
+        FwDescriptionAttr.newFirmwarePolicySupported,
+        NewFirmwarePolicy.all.map(IppKeyword.new).toList(),
+      ),
+      IppAttribute.single(
+        FwDescriptionAttr.firmwareRepositoryUriConfigured,
+        const IppUri('https://example.com/fw-sim/repository'),
+      ),
+      IppAttribute(FwDescriptionAttr.firmwareRepositoryUriSupported, const [
+        IppUri('https://example.com/fw-sim/repository'),
+      ]),
+      IppAttribute.single(FwStatusAttr.newFirmwareCheckDateTime, _checkDateTimeValue()),
+      if (delayedUntilKeyword != null)
+        IppAttribute.single(
+          FwStatusAttr.newFirmwareDelayedUntil,
+          IppKeyword(delayedUntilKeyword!),
+        ),
+      if (delayedUntilDateTime != null)
+        IppAttribute.single(
+          FwStatusAttr.newFirmwareDelayedUntilDateTime,
+          IppDateTime.fromDateTimeUtc(delayedUntilDateTime!),
+        ),
+      ..._newFirmwareDataAttributes(),
+    ];
+  }
+
+  // --- Hooks used by FirmwareStateMachine ------------------------------
+  // These mutate private state but must be callable from
+  // firmware_state_machine.dart, so they're public methods rather than
+  // exposing the fields themselves.
+
+  void beginPipeline() {
+    _stateReasons.removeAll(FwPhaseReasons.allKeywords);
+    printerState = 5; // stopped, per §5.2's body text
+    isAcceptingJobs = false;
+    currentPhase = null;
+    notifyListeners();
+  }
+
+  void setPhaseInProgress(FwPhase phase, String inProgressReason) {
+    currentPhase = phase;
+    _stateReasons.add(inProgressReason);
+    notifyListeners();
+  }
+
+  void setPhaseResult(FwPhase phase, String inProgressReason, String resultReason) {
+    _stateReasons
+      ..remove(inProgressReason)
+      ..add(resultReason);
+    notifyListeners();
+  }
+
+  void beginOutage() {
+    server?.setSimulateUnreachable(true);
+    debugOnUnreachableChanged?.call(true);
+    notifyListeners();
+  }
+
+  void endOutage() {
+    server?.setSimulateUnreachable(false);
+    debugOnUnreachableChanged?.call(false);
+    notifyListeners();
+  }
+
+  /// Test-only hook: notified whenever [beginOutage]/[endOutage] run, so
+  /// tests can assert on the mid-update-outage simulation without standing
+  /// up a real [IppServer].
+  void Function(bool unreachable)? debugOnUnreachableChanged;
+
+  /// Test-only: runs the install pipeline and waits for it to finish,
+  /// instead of the normal fire-and-forget path used by the real
+  /// Update-Printer-Firmware handler and the `auto` policy.
+  @visibleForTesting
+  Future<void> debugRunPipelineToCompletion() => _stateMachine.run();
+
+  void concludePipeline({required bool installedSuccessfully}) {
+    currentPhase = null;
+    printerState = 3; // idle
+    isAcceptingJobs = true;
+    if (installedSuccessfully) {
+      final info = _newFirmware;
+      if (info != null) {
+        if (info.stringVersions.isNotEmpty) {
+          currentFirmwareVersion = info.stringVersions.first;
+        }
+        currentFirmwareInfoUri = info.infoUri ?? currentFirmwareInfoUri;
+      }
+      _newFirmware = null;
+      _newFirmwareOutOfBand = const IppNoValue();
+      checkDateTime = null;
+      _stateReasons.remove(FwStateReason.newFirmwareAvailable);
+    }
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _delayTimer?.cancel();
+    _stateMachine.cancel();
+    super.dispose();
+  }
+}

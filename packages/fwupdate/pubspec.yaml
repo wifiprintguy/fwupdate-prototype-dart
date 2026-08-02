@@ -1,0 +1,19 @@
+name: fwupdate
+description: >
+  Attribute names, operation codecs, state-reason keywords, and status codes
+  defined by IPP Firmware Update Extensions v1.0 (FWUPDATE), layered on
+  package:ipp's transport-agnostic RFC 8010 codec.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  ipp:
+    path: ../ipp
+  meta: ^1.15.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0
