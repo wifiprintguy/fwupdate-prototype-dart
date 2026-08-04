@@ -47,6 +47,7 @@ class SimulationControlScreen extends StatelessWidget {
             onChanged: engine.setClockSet,
           ),
         ),
+        _InstalledFirmwareSection(engine: engine),
         _FirmwareAvailabilitySection(engine: engine, config: config),
         _RepositorySection(engine: engine, config: config),
         _PipelineSection(engine: engine, config: config),
@@ -55,6 +56,53 @@ class SimulationControlScreen extends StatelessWidget {
         _PolicySection(engine: engine, config: config),
         _DelaySection(engine: engine, config: config),
       ],
+    );
+  }
+}
+
+class _InstalledFirmwareSection extends StatelessWidget {
+  const _InstalledFirmwareSection({required this.engine});
+  final PrinterEngine engine;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        title: const Text('printer-firmware-string-version'),
+        subtitle: Text(engine.currentFirmwareVersion),
+        trailing: TextButton(
+          onPressed: () async {
+            final controller = TextEditingController(text: engine.currentFirmwareVersion);
+            final newVersion = await showDialog<String>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Currently installed Firmware'),
+                content: TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    labelText: 'printer-firmware-string-version',
+                  ),
+                  autofocus: true,
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, controller.text.trim()),
+                    child: const Text('Save'),
+                  ),
+                ],
+              ),
+            );
+            if (newVersion != null && newVersion.isNotEmpty) {
+              engine.setCurrentFirmwareVersion(newVersion);
+            }
+          },
+          child: const Text('Edit'),
+        ),
+      ),
     );
   }
 }

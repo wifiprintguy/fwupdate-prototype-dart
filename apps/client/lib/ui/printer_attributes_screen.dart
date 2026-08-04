@@ -75,7 +75,9 @@ class PrinterAttributesScreen extends StatelessWidget {
           _SectionCard(
             title: 'Currently installed Firmware',
             children: [
+              Text('printer-firmware-name: ${session.currentFirmwareNames.join(', ')}'),
               Text('printer-firmware-string-version: ${session.currentFirmwareVersion ?? '—'}'),
+              Text('printer-firmware-patches: ${session.currentFirmwarePatches.join(', ')}'),
               if (session.currentFirmwareInfoUri != null)
                 InkWell(
                   onTap: () {}, // A real Client would launch this URI; out of scope here.

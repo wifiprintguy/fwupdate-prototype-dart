@@ -15,10 +15,17 @@ import 'ipp_message.dart';
 /// HTTP response, which is what a Client actually observes when a real
 /// printer drops off the network mid-update.
 class IppServer {
-  IppServer(this._handler);
+  IppServer(this._handler, {Future<void> Function(HttpRequest request)? onOtherRequest})
+    : _onOtherRequest = onOtherRequest;
 
   final Future<IppMessage> Function(IppMessage request, HttpRequest httpRequest)
   _handler;
+
+  /// Handles any request that isn't a POST (i.e. not an IPP operation) —
+  /// e.g. so the Printer app can serve real content at the URLs its
+  /// `*-info-uri` attributes point to, instead of those being dead links.
+  /// Requests are answered 404 if this is left unset.
+  final Future<void> Function(HttpRequest request)? _onOtherRequest;
 
   HttpServer? _server;
   bool _simulateUnreachable = false;
@@ -41,6 +48,16 @@ class IppServer {
       } catch (_) {
         // Best-effort: the point is just to not send a well-formed
         // response back.
+      }
+      return;
+    }
+
+    if (request.method != 'POST') {
+      if (_onOtherRequest != null) {
+        await _onOtherRequest(request);
+      } else {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
       }
       return;
     }

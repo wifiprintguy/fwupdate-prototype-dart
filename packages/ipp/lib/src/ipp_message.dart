@@ -63,6 +63,18 @@ final class IppMessage {
 
   final int versionMajor;
   final int versionMinor;
+
+  /// Returns a copy declaring a different version — for a Printer to apply
+  /// [IppVersion.negotiateResponseVersion] to an otherwise-finished
+  /// response without every response-building call site needing to know
+  /// about negotiation.
+  IppMessage copyWithVersion(int versionMajor, int versionMinor) => IppMessage(
+    versionMajor: versionMajor,
+    versionMinor: versionMinor,
+    operationIdOrStatusCode: operationIdOrStatusCode,
+    requestId: requestId,
+    groups: groups,
+  );
   final int operationIdOrStatusCode;
   final int requestId;
   final List<IppAttributeGroup> groups;

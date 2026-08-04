@@ -29,7 +29,7 @@ class PrinterAdvertiser {
       name: name,
       type: ippServiceType,
       port: port,
-      attributes: {'txtvers': '1', 'rp': '', 'ty': name, 'note': scenarioNote},
+      attributes: {'txtvers': '1', 'rp': ippResourcePath, 'ty': name, 'note': scenarioNote},
     );
     final broadcast = BonsoirBroadcast(service: service);
     await broadcast.ready;

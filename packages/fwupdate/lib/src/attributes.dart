@@ -75,6 +75,22 @@ abstract final class FwStatusAttr {
   ];
 }
 
+/// Attributes describing the Printer's *currently installed* Firmware.
+/// FWUPDATE doesn't define these itself — they're from [PWG 5100.13] "IPP
+/// Driver Replacement Extensions v2.0" — but Table 1 (§4.2) explicitly
+/// cross-references them as the "Current Firmware Status Attribute"
+/// counterpart to several `printer-new-firmware-*` attributes, so a
+/// Printer implementing FWUPDATE needs them to make that before/after
+/// comparison meaningful. `printer-firmware-info-uri` is the one exception
+/// that lives in [FwStatusAttr] instead, since FWUPDATE §6.3.1 defines it
+/// directly (REQUIRED) rather than merely referencing PWG 5100.13.
+abstract final class CurrentFirmwareAttr {
+  static const name = 'printer-firmware-name';
+  static const patches = 'printer-firmware-patches';
+  static const stringVersion = 'printer-firmware-string-version';
+  static const version = 'printer-firmware-version';
+}
+
 /// Table 2 — keywords for the `delay-update-until` attribute (§6.1.1).
 abstract final class DelayUpdateUntil {
   static const noDelay = 'no-delay';

@@ -52,6 +52,73 @@ void main() {
       expect((attrs['printer-is-accepting-jobs']!.value as IppBoolean).value, isTrue);
       expect(attrs[FwStatusAttr.newFirmwareName]!.value, isA<IppNoValue>());
     });
+
+    test('reports the currently-installed Firmware via PWG 5100.13 attributes', () async {
+      final response = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+        ),
+      );
+      final attrs = response.printerAttributes;
+      expect(
+        attrs[CurrentFirmwareAttr.name]!.values.map((v) => v.toString()),
+        ['main-controller'],
+      );
+      expect(attrs[CurrentFirmwareAttr.patches]!.values.map((v) => v.toString()), ['none']);
+      expect(
+        attrs[CurrentFirmwareAttr.stringVersion]!.values.map((v) => v.toString()),
+        ['1.0.0'],
+      );
+      expect(attrs[CurrentFirmwareAttr.version]!.values.single, isA<IppOctetString>());
+    });
+
+    test('requested-attributes filters the response to just those names', () async {
+      final response = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+          requestedAttributes: ['printer-state', 'printer-is-accepting-jobs'],
+        ),
+      );
+      final names = response.printerAttributes.attributes.map((a) => a.name).toSet();
+      expect(names, {'printer-state', 'printer-is-accepting-jobs'});
+    });
+
+    test("requested-attributes containing 'all' returns everything", () async {
+      final filtered = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+          requestedAttributes: ['printer-state'],
+        ),
+      );
+      final all = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+          requestedAttributes: ['all'],
+        ),
+      );
+      expect(filtered.printerAttributes.attributes.length, 1);
+      expect(
+        all.printerAttributes.attributes.length,
+        greaterThan(filtered.printerAttributes.attributes.length),
+      );
+    });
+
+    test('an unrecognized requested attribute name is simply absent, not an error', () async {
+      final response = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+          requestedAttributes: ['printer-state', 'no-such-attribute'],
+        ),
+      );
+      expect(response.isSuccessful, isTrue);
+      final names = response.printerAttributes.attributes.map((a) => a.name).toSet();
+      expect(names, {'printer-state'});
+    });
   });
 
   group('Check-For-New-Printer-Firmware', () {
@@ -309,6 +376,36 @@ void main() {
         ),
       );
       expect(response.isSuccessful, isTrue);
+    });
+  });
+
+  group('Version negotiation', () {
+    test('a modern (2.0) request gets a 2.0 response', () async {
+      final response = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+        ),
+      );
+      expect((response.versionMajor, response.versionMinor), (2, 0));
+    });
+
+    test('an older (1.1) request gets an equally old response', () async {
+      final request = buildGetPrinterAttributesRequest(
+        printerUri: printerUri.toString(),
+        requestId: nextRequestId++,
+      ).copyWithVersion(1, 1);
+      final response = await send(request);
+      expect((response.versionMajor, response.versionMinor), (1, 1));
+    });
+
+    test('a request newer than this project supports is capped at 2.0', () async {
+      final request = buildGetPrinterAttributesRequest(
+        printerUri: printerUri.toString(),
+        requestId: nextRequestId++,
+      ).copyWithVersion(2, 7);
+      final response = await send(request);
+      expect((response.versionMajor, response.versionMinor), (2, 0));
     });
   });
 }

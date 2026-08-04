@@ -1,3 +1,5 @@
+import 'service_type.dart';
+
 /// A resolved Printer-app instance found on the LAN.
 final class DiscoveredPrinter {
   const DiscoveredPrinter({
@@ -16,8 +18,15 @@ final class DiscoveredPrinter {
   /// record, if any (see [PrinterAdvertiser]).
   String? get scenarioNote => attributes['note'];
 
-  Uri toPrinterUri({String path = '/ipp/print'}) =>
-      Uri(scheme: 'ipp', host: host, port: port, path: path);
+  /// Builds the URI a Client should actually connect to. Defaults to the
+  /// advertised `rp` TXT record value (per the Bonjour Printing
+  /// Specification) rather than assuming a fixed path, falling back to
+  /// [ippResourcePath] if `rp` is missing (e.g. a manually-entered
+  /// host:port with no TXT records at all).
+  Uri toPrinterUri({String? path}) {
+    final resourcePath = path ?? attributes['rp'] ?? ippResourcePath;
+    return Uri(scheme: 'ipp', host: host, port: port, path: '/$resourcePath');
+  }
 
   @override
   String toString() => '$name ($host:$port)';

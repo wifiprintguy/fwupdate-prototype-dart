@@ -83,11 +83,42 @@ abstract final class IppStatusCode {
   };
 }
 
-/// The IPP version this project's messages declare (IPP/1.1, per [STD92]
-/// a.k.a. RFC 8011, which the FWUPDATE spec builds on).
+/// FWUPDATE itself never mentions the IPP `version-number` field — it only
+/// borrows baseline attribute/operation semantics from [STD92] (RFC
+/// 8010/8011, IPP/1.1), independent of whatever version-number a given
+/// packet declares. [STD92] isn't a stand-in for "IPP/1.1 only": real
+/// IPP/2.0 printers still implement exactly those STD92-inherited
+/// behaviors, just under a newer version header.
+///
+/// This isn't purely theoretical: a libcups-based prototype of FWUPDATE
+/// failed its own `.test` file when a Printer responded with 1.1 instead
+/// of 2.0, even though nothing in the FWUPDATE draft itself says 2.0 is
+/// required. That's corroborating real-world evidence that PWG's own
+/// conformance tooling for this extension assumes an IPP/2.0 baseline —
+/// hence defaulting to 2.0 here rather than 1.1, while still negotiating
+/// down for a request that genuinely declares an older version.
 abstract final class IppVersion {
-  static const int major = 1;
-  static const int minor = 1;
+  /// The version this project's own Client-side request builders declare
+  /// by default. IPP/2.0 is what modern Clients/Printers actually speak on
+  /// the wire today, so that's the more representative default for a test
+  /// harness — a request explicitly built with an older version (e.g. to
+  /// test negotiation itself) still works via [IppMessage]'s constructor
+  /// parameters.
+  static const int major = 2;
+  static const int minor = 0;
+
+  /// The version a Printer should declare in its response, per standard
+  /// IPP version-negotiation practice: echo the request's version if it's
+  /// at or below what this project supports, otherwise cap at the highest
+  /// version supported ([major].[minor]).
+  static (int major, int minor) negotiateResponseVersion(
+    int requestMajor,
+    int requestMinor,
+  ) {
+    final requestIsSupported =
+        requestMajor < major || (requestMajor == major && requestMinor <= minor);
+    return requestIsSupported ? (requestMajor, requestMinor) : (major, minor);
+  }
 }
 
 /// The HTTP content-type used to carry IPP messages.

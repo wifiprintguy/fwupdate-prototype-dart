@@ -67,9 +67,91 @@ class PrinterEngine extends ChangeNotifier {
   }
 
   // --- Installed firmware (the "current", not "new", firmware) ---------
+  //
+  // Modeled as parallel lists (one entry per firmware component) to match
+  // how PWG 5100.13 defines these as 1setOf attributes — see
+  // [CurrentFirmwareAttr]. In practice this project's UI only ever edits a
+  // single component, so [setCurrentFirmwareVersion] collapses to a
+  // one-element list; a successful install (see [concludePipeline]) can
+  // still carry over a multi-component identity if the "new" Firmware was
+  // configured with one.
 
-  String currentFirmwareVersion = '1.0.0';
-  Uri? currentFirmwareInfoUri = Uri.parse('https://example.com/fw-sim/release-notes/1.0.0');
+  List<String> currentFirmwareNames = ['main-controller'];
+  List<String> currentFirmwarePatches = ['none'];
+  List<String> currentFirmwareStringVersions = ['1.0.0'];
+  List<Uint8List> currentFirmwareVersionBytes = [Uint8List.fromList(utf8.encode('1.0.0'))];
+
+  /// The primary/first component's version string — what the Home tab and
+  /// Simulation Control's edit dialog show and edit, and what
+  /// [releaseNotesUri] keys off of.
+  String get currentFirmwareVersion =>
+      currentFirmwareStringVersions.isNotEmpty ? currentFirmwareStringVersions.first : '';
+
+  /// Self-hosted: computed from [_serverBaseUri] rather than stored, so it's
+  /// always a real, reachable link (served by [handleOtherRequest]) instead
+  /// of a placeholder — falls back to a dead `example.com` URL only before
+  /// the server has actually started.
+  Uri get currentFirmwareInfoUri => releaseNotesUri(currentFirmwareVersion);
+
+  void setCurrentFirmwareVersion(String version) {
+    currentFirmwareStringVersions = [version];
+    currentFirmwareVersionBytes = [Uint8List.fromList(utf8.encode(version))];
+    notifyListeners();
+  }
+
+  // --- Self-hosted release notes ---------------------------------------
+
+  Uri? _serverBaseUri;
+
+  /// Called once by the app's bootstrap code after the IPP server has
+  /// actually bound, so `printer-firmware-info-uri`/
+  /// `printer-new-firmware-info-uri` can point at a real, reachable URL
+  /// this same process serves (see [handleOtherRequest]) instead of a
+  /// placeholder.
+  void configureServerAddress(String host, int port) {
+    _serverBaseUri = Uri(scheme: 'http', host: host, port: port);
+    notifyListeners();
+  }
+
+  Uri releaseNotesUri(String version) {
+    final base = _serverBaseUri ?? Uri.parse('https://example.com');
+    return base.replace(path: '/release-notes/${Uri.encodeComponent(version)}');
+  }
+
+  /// Serves a minimal release-notes page for any GET request the IPP
+  /// dispatcher doesn't otherwise handle, so the info-uri attributes are
+  /// genuinely clickable/fetchable rather than dead links.
+  Future<void> handleOtherRequest(HttpRequest request) async {
+    const prefix = '/release-notes/';
+    if (request.method == 'GET' && request.uri.path.startsWith(prefix)) {
+      final version = Uri.decodeComponent(request.uri.path.substring(prefix.length));
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.html
+        ..write(_releaseNotesHtml(version));
+      await request.response.close();
+      return;
+    }
+    request.response.statusCode = HttpStatus.notFound;
+    await request.response.close();
+  }
+
+  String _releaseNotesHtml(String version) {
+    final info = _newFirmware;
+    final String body;
+    if (info != null && info.stringVersions.contains(version)) {
+      body =
+          '<p>Urgency: ${info.urgency}</p>'
+          '<p>Patches: ${info.patches.join(', ')}</p>'
+          '<p>Size: ${info.kOctets} kiB</p>';
+    } else if (version == currentFirmwareVersion) {
+      body = '<p>This is the currently installed Firmware version.</p>';
+    } else {
+      body = '<p>No release notes available for this version.</p>';
+    }
+    return '<html><head><title>Firmware $version release notes</title></head>'
+        '<body><h1>$printerName — Firmware $version</h1>$body</body></html>';
+  }
 
   // --- Device clock -------------------------------------------------------
 
@@ -158,8 +240,13 @@ class PrinterEngine extends ChangeNotifier {
         requestId: request.requestId,
       ),
     };
-    _logTransaction(request, response, httpRequest);
-    return response;
+    final (versionMajor, versionMinor) = IppVersion.negotiateResponseVersion(
+      request.versionMajor,
+      request.versionMinor,
+    );
+    final versionedResponse = response.copyWithVersion(versionMajor, versionMinor);
+    _logTransaction(request, versionedResponse, httpRequest);
+    return versionedResponse;
   }
 
   void _logTransaction(IppMessage request, IppMessage response, HttpRequest httpRequest) {
@@ -218,8 +305,25 @@ class PrinterEngine extends ChangeNotifier {
     return IppMessage.statusResponse(
       statusCode: IppStatusCode.successfulOk,
       requestId: request.requestId,
-      printerAttributes: _buildFullPrinterAttributes(),
+      printerAttributes: _selectRequestedAttributes(request),
     );
+  }
+
+  /// Applies the `requested-attributes` operation attribute (RFC 8011
+  /// §3.2.5.1): if the Client supplied it, the response's Printer
+  /// Attributes group is filtered down to just those names (or left
+  /// unfiltered if it's absent, or if `'all'` is among the requested
+  /// values). Unrecognized/unsupported names are simply absent from the
+  /// result, per ordinary IPP practice, rather than treated as an error.
+  List<IppAttribute> _selectRequestedAttributes(IppMessage request) {
+    final full = _buildFullPrinterAttributes();
+    final requested = request.operationAttributes['requested-attributes'];
+    if (requested == null || requested.isOutOfBand) return full;
+
+    final requestedNames = requested.values.map((v) => v.toString()).toSet();
+    if (requestedNames.contains('all')) return full;
+
+    return full.where((attribute) => requestedNames.contains(attribute.name)).toList();
   }
 
   IppMessage _handleCheckForNewPrinterFirmware(IppMessage request, HttpRequest httpRequest) {
@@ -424,8 +528,20 @@ class PrinterEngine extends ChangeNotifier {
 
   List<IppAttribute> _newFirmwareDataAttributes() {
     final info = _newFirmware;
-    if (info != null) return info.toAttributes();
-    return buildOutOfBandFirmwareDataAttributes(_newFirmwareOutOfBand);
+    if (info == null) return buildOutOfBandFirmwareDataAttributes(_newFirmwareOutOfBand);
+    // Self-host the info-uri (see [releaseNotesUri]) unless the tester
+    // explicitly set one via the Simulation Control edit dialog.
+    if (info.infoUri != null) return info.toAttributes();
+    final version = info.stringVersions.isNotEmpty ? info.stringVersions.first : 'unknown';
+    return FirmwareInfo(
+      names: info.names,
+      patches: info.patches,
+      kOctets: info.kOctets,
+      stringVersions: info.stringVersions,
+      urgency: info.urgency,
+      versions: info.versions,
+      infoUri: releaseNotesUri(version),
+    ).toAttributes();
   }
 
   List<IppAttribute> _buildFullPrinterAttributes() {
@@ -447,9 +563,21 @@ class PrinterEngine extends ChangeNotifier {
       IppAttribute.single('ipp-features-supported', const IppKeyword(ippFeatureFwupdate)),
       IppAttribute.single(
         FwStatusAttr.firmwareInfoUri,
-        IppUri((currentFirmwareInfoUri ?? Uri.parse('https://example.com')).toString()),
+        IppUri(currentFirmwareInfoUri.toString()),
       ),
-      IppAttribute.single('printer-firmware-string-version', IppText(currentFirmwareVersion)),
+      IppAttribute(CurrentFirmwareAttr.name, currentFirmwareNames.map(IppName.new).toList()),
+      IppAttribute(
+        CurrentFirmwareAttr.patches,
+        currentFirmwarePatches.map(IppText.new).toList(),
+      ),
+      IppAttribute(
+        CurrentFirmwareAttr.stringVersion,
+        currentFirmwareStringVersions.map(IppText.new).toList(),
+      ),
+      IppAttribute(
+        CurrentFirmwareAttr.version,
+        currentFirmwareVersionBytes.map(IppOctetString.new).toList(),
+      ),
       IppAttribute(
         FwDescriptionAttr.delayUpdateUntilSupported,
         DelayUpdateUntil.all.map(IppKeyword.new).toList(),
@@ -537,10 +665,16 @@ class PrinterEngine extends ChangeNotifier {
     if (installedSuccessfully) {
       final info = _newFirmware;
       if (info != null) {
+        // The newly-installed Firmware's full identity becomes the new
+        // "currently installed" one — not just its version string.
+        // currentFirmwareInfoUri is derived from currentFirmwareVersion
+        // (see its getter), so this alone keeps it correct too.
+        if (info.names.isNotEmpty) currentFirmwareNames = List.of(info.names);
+        if (info.patches.isNotEmpty) currentFirmwarePatches = List.of(info.patches);
         if (info.stringVersions.isNotEmpty) {
-          currentFirmwareVersion = info.stringVersions.first;
+          currentFirmwareStringVersions = List.of(info.stringVersions);
         }
-        currentFirmwareInfoUri = info.infoUri ?? currentFirmwareInfoUri;
+        if (info.versions.isNotEmpty) currentFirmwareVersionBytes = List.of(info.versions);
       }
       _newFirmware = null;
       _newFirmwareOutOfBand = const IppNoValue();

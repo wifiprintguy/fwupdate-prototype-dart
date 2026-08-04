@@ -71,7 +71,14 @@ class PrinterSession extends ChangeNotifier {
   Set<String> get stateReasons =>
       _attrs['printer-state-reasons']?.values.map((v) => v.toString()).toSet() ?? {};
 
-  String? get currentFirmwareVersion => _attrs['printer-firmware-string-version']?.value.toString();
+  String? get currentFirmwareVersion =>
+      _attrs[CurrentFirmwareAttr.stringVersion]?.value.toString();
+
+  List<String> get currentFirmwareNames =>
+      _attrs[CurrentFirmwareAttr.name]?.values.map((v) => v.toString()).toList() ?? const [];
+
+  List<String> get currentFirmwarePatches =>
+      _attrs[CurrentFirmwareAttr.patches]?.values.map((v) => v.toString()).toList() ?? const [];
 
   Uri? get currentFirmwareInfoUri {
     final value = _attrs[FwStatusAttr.firmwareInfoUri]?.value;

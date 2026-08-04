@@ -28,5 +28,11 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app discovers IPP printers on your local network so it can test firmware update behavior against them.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ipp._tcp</string>
+	</array>
 </dict>
 </plist>

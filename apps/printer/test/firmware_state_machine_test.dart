@@ -31,6 +31,8 @@ void main() {
 
       expect(engine.newFirmware, isNull);
       expect(engine.currentFirmwareVersion, '2.0.0');
+      expect(engine.currentFirmwareNames, ['main-controller']);
+      expect(engine.currentFirmwarePatches, ['none']);
       expect(engine.printerState, 3);
       expect(engine.isAcceptingJobs, isTrue);
       expect(engine.stateReasons, isNot(contains(FwStateReason.newFirmwareAvailable)));
@@ -64,6 +66,7 @@ void main() {
       await engine.debugRunPipelineToCompletion();
 
       expect(engine.currentFirmwareVersion, '1.0.0');
+      expect(engine.currentFirmwareNames, ['main-controller'], reason: 'unchanged on failure');
       expect(engine.newFirmware, isNotNull, reason: 'firmware stays available for a retry');
       expect(
         engine.stateReasons,
@@ -117,6 +120,35 @@ void main() {
       expect(engine.newFirmwareOutOfBandState, FwOutOfBandState.neverChecked);
       expect(engine.checkDateTime, isNull);
       expect(engine.stateReasons, isEmpty);
+    });
+
+    test('a successful install carries over the new patches, not just the version', () async {
+      engine.replaceConfig(
+        SimulationConfig(
+          firmwareAvailable: true,
+          firmwareInfo: FirmwareInfo.simple(
+            name: 'wifi-module',
+            stringVersion: '3.1.4',
+            urgency: NewFirmwareUrgency.security,
+            patch: 'CVE-2026-41210',
+          ),
+          phaseDuration: const Duration(milliseconds: 10),
+        ),
+      );
+
+      await engine.debugRunPipelineToCompletion();
+
+      expect(engine.currentFirmwareNames, ['wifi-module']);
+      expect(engine.currentFirmwarePatches, ['CVE-2026-41210']);
+      expect(engine.currentFirmwareVersion, '3.1.4');
+    });
+
+    test('setCurrentFirmwareVersion collapses to a single component', () {
+      engine.setCurrentFirmwareVersion('9.9.9');
+
+      expect(engine.currentFirmwareVersion, '9.9.9');
+      expect(engine.currentFirmwareStringVersions, ['9.9.9']);
+      expect(engine.currentFirmwareVersionBytes, hasLength(1));
     });
   });
 }

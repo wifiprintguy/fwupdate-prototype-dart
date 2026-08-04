@@ -32,19 +32,27 @@ class PrinterHomeScreen extends StatelessWidget {
                 Text(engine.printerName, style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 4),
                 SelectableText('ipp://$address/ipp/print'),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    _StatusChip(label: printerStateLabel(engine.printerState)),
-                    const SizedBox(width: 8),
-                    _StatusChip(
-                      label: engine.isAcceptingJobs ? 'accepting jobs' : 'not accepting jobs',
-                      color: engine.isAcceptingJobs ? Colors.green : Colors.orange,
-                    ),
-                  ],
-                ),
               ],
             ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Column(
+            children: [
+              _AttributeRow(
+                name: 'printer-state',
+                value: _StatusChip(label: printerStateLabel(engine.printerState)),
+              ),
+              const Divider(height: 1),
+              _AttributeRow(
+                name: 'printer-is-accepting-jobs',
+                value: _StatusChip(
+                  label: engine.isAcceptingJobs ? 'accepting jobs' : 'not accepting jobs',
+                  color: engine.isAcceptingJobs ? Colors.green : Colors.orange,
+                ),
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 12),
@@ -64,9 +72,21 @@ class PrinterHomeScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('printer-firmware-string-version: ${engine.currentFirmwareVersion}'),
-              if (engine.currentFirmwareInfoUri != null)
-                Text('printer-firmware-info-uri: ${engine.currentFirmwareInfoUri}'),
+              SelectableText('printer-firmware-name: ${engine.currentFirmwareNames.join(', ')}'),
+              SelectableText(
+                'printer-firmware-string-version: ${engine.currentFirmwareVersion}',
+              ),
+              SelectableText(
+                'printer-firmware-patches: ${engine.currentFirmwarePatches.join(', ')}',
+              ),
+              SelectableText('printer-firmware-info-uri: ${engine.currentFirmwareInfoUri}'),
+              const SizedBox(height: 4),
+              Text(
+                'Edit this from the Simulate tab.',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(fontStyle: FontStyle.italic),
+              ),
             ],
           ),
         ),
@@ -127,13 +147,34 @@ class _NewFirmwareSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('name: ${info.names.join(', ')}'),
-        Text('string-version: ${info.stringVersions.join(', ')}'),
-        Text('urgency: ${info.urgency}'),
-        Text('k-octets: ${info.kOctets}'),
-        Text('patches: ${info.patches.join(', ')}'),
-        if (info.infoUri != null) Text('info-uri: ${info.infoUri}'),
+        SelectableText('name: ${info.names.join(', ')}'),
+        SelectableText('string-version: ${info.stringVersions.join(', ')}'),
+        SelectableText('urgency: ${info.urgency}'),
+        SelectableText('k-octets: ${info.kOctets}'),
+        SelectableText('patches: ${info.patches.join(', ')}'),
+        if (info.infoUri != null) SelectableText('info-uri: ${info.infoUri}'),
       ],
+    );
+  }
+}
+
+/// One IPP attribute name on the left, its value on the right — for
+/// attributes worth showing individually rather than grouped into a
+/// [_SectionCard] (e.g. because each has its own status-color chip).
+class _AttributeRow extends StatelessWidget {
+  const _AttributeRow({required this.name, required this.value});
+
+  final String name;
+  final Widget value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [Text(name), value],
+      ),
     );
   }
 }

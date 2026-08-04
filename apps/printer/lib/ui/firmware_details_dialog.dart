@@ -92,7 +92,10 @@ class _FirmwareDetailsDialogState extends State<_FirmwareDetailsDialog> {
             ),
             TextField(
               controller: _infoUri,
-              decoration: const InputDecoration(labelText: 'printer-new-firmware-info-uri'),
+              decoration: const InputDecoration(
+                labelText: 'printer-new-firmware-info-uri',
+                hintText: 'Leave blank to self-host release notes',
+              ),
             ),
           ],
         ),
@@ -109,7 +112,10 @@ class _FirmwareDetailsDialogState extends State<_FirmwareDetailsDialog> {
                 urgency: _urgency,
                 patch: _patch.text.trim().isEmpty ? 'none' : _patch.text.trim(),
                 kOctets: int.tryParse(_kOctets.text.trim()) ?? 45000,
-                infoUri: Uri.tryParse(_infoUri.text.trim()),
+                // Leave unset (rather than an empty Uri) when blank, so
+                // PrinterEngine's self-hosted release-notes page is used
+                // instead of a dead link.
+                infoUri: _infoUri.text.trim().isEmpty ? null : Uri.tryParse(_infoUri.text.trim()),
               ),
             );
           },

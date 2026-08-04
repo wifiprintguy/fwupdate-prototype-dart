@@ -93,6 +93,30 @@ void main() {
       expect(group!['delay-update-until']!.value, isA<IppUnsupported>());
     });
 
+    test('version defaults to 2.0 and round-trips through the wire', () {
+      final request = IppMessage.request(
+        operationId: IppOperationId.getPrinterAttributes,
+        requestId: 1,
+        printerUri: 'ipp://printer.local:1631/ipp/print',
+      );
+      expect((request.versionMajor, request.versionMinor), (2, 0));
+
+      final decoded = IppMessage.decode(request.encode());
+      expect((decoded.versionMajor, decoded.versionMinor), (2, 0));
+    });
+
+    test('copyWithVersion changes only the version', () {
+      final request = IppMessage.request(
+        operationId: IppOperationId.getPrinterAttributes,
+        requestId: 1,
+        printerUri: 'ipp://printer.local:1631/ipp/print',
+      );
+      final downgraded = request.copyWithVersion(1, 1);
+      expect((downgraded.versionMajor, downgraded.versionMinor), (1, 1));
+      expect(downgraded.operationId, request.operationId);
+      expect(downgraded.requestId, request.requestId);
+    });
+
     test('encodes booleans and integers correctly', () {
       final message = IppMessage.statusResponse(
         statusCode: IppStatusCode.successfulOk,
@@ -115,6 +139,22 @@ void main() {
             .value,
         45000,
       );
+    });
+  });
+
+  group('IppVersion.negotiateResponseVersion', () {
+    test('echoes a request version below what this project supports', () {
+      expect(IppVersion.negotiateResponseVersion(1, 0), (1, 0));
+      expect(IppVersion.negotiateResponseVersion(1, 1), (1, 1));
+    });
+
+    test('echoes a request version exactly at the supported maximum', () {
+      expect(IppVersion.negotiateResponseVersion(2, 0), (2, 0));
+    });
+
+    test('caps at the supported maximum for a higher request version', () {
+      expect(IppVersion.negotiateResponseVersion(2, 5), (2, 0));
+      expect(IppVersion.negotiateResponseVersion(3, 0), (2, 0));
     });
   });
 }

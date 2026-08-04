@@ -19,16 +19,26 @@ final class ConflictingDelayAttributesError extends ArgumentError {
 
 /// Builds a Get-Printer-Attributes request (baseline STD92/RFC 8011
 /// operation; every Client interaction starts or checks in with this).
+///
+/// [requestedAttributes], if supplied, becomes the `requested-attributes`
+/// operation attribute (RFC 8011 §3.2.5.1) — a Printer conforming to this
+/// project's implementation returns only those attribute names (or
+/// everything, if `'all'` is among them or this is left null/empty).
 IppMessage buildGetPrinterAttributesRequest({
   required String printerUri,
   required int requestId,
   String requestingUserName = '',
+  List<String>? requestedAttributes,
 }) {
   return IppMessage.request(
     operationId: IppOperationId.getPrinterAttributes,
     requestId: requestId,
     printerUri: printerUri,
     requestingUserName: requestingUserName,
+    operationAttributes: [
+      if (requestedAttributes != null && requestedAttributes.isNotEmpty)
+        IppAttribute('requested-attributes', requestedAttributes.map(IppKeyword.new).toList()),
+    ],
   );
 }
 

@@ -14,12 +14,14 @@ final class ScenarioPreset {
   final void Function(PrinterEngine engine) apply;
 }
 
+// infoUri is left unset — PrinterEngine self-hosts a real release-notes
+// page for it (see releaseNotesUri/handleOtherRequest) rather than pointing
+// at a placeholder.
 final _securityFirmware = FirmwareInfo.simple(
   name: 'main-controller',
   stringVersion: '2.4.1',
   urgency: NewFirmwareUrgency.security,
   patch: 'CVE-2026-41210',
-  infoUri: Uri.parse('https://example.com/fw-sim/release-notes/2.4.1'),
 );
 
 const _allSucceed = {
