@@ -23,11 +23,19 @@ automated tests. What's *not* built is called out explicitly in Non-Goals and th
 Milestones (Set-Printer-Attributes, Get-Notifications, chaos mode, real TLS).
 
 ```
-packages/ipp        6 tests   — wire codec + HTTP transport
+packages/ipp       14 tests   — wire codec + HTTP transport (incl. ipp/ipps scheme handling)
 packages/fwupdate   6 tests   — attributes/operations/state-reasons vocabulary
-apps/printer       15 tests   — state machine + real end-to-end HTTP loopback
-apps/client         5 tests   — PrinterSession driven against a real PrinterEngine
+apps/printer       32 tests   — state machine + real end-to-end HTTP loopback
+apps/client        13 tests   — PrinterSession driven against a real PrinterEngine
 ```
+
+Beyond the original v1 milestones, real multi-device testing surfaced a round of hardening
+that's also in place now: a stable default listening port (13631, incrementing on conflict)
+instead of an ephemeral one, real IPP/1.1↔2.0 version negotiation, RFC 8011
+`requested-attributes` filtering on Get-Printer-Attributes, and — the biggest behavioral
+change — the Client no longer requires a human to press "Check for new Firmware" or manually
+refresh: it keeps its attribute view continuously fresh and decides on its own when a check
+is warranted (see [Automatic status monitoring](#automatic-status-monitoring) below).
 
 See [BUILD.md](BUILD.md) for prerequisites, bootstrap steps, running both apps, producing
 release builds, and testing.
@@ -101,32 +109,42 @@ packages/
 apps/
   printer/                     # Printer app (desktop-first)
     lib/
-      printer_state.dart       # live attribute values, ChangeNotifier
+      printer_state.dart       # PrinterEngine: live attribute values, dispatch, ChangeNotifier
       firmware_state_machine.dart  # phase engine driving §4.1's Discovery→...→Cleanup/Recovery
       simulation_config.dart   # every injectable fault, as one serializable config object
       scenario_presets.dart    # named bundles of SimulationConfig (see Fault Injection Catalog)
+      transaction_log_entry.dart  # one recorded request/response, for the Request Log tab
       ui/
         printer_home_screen.dart        # current printer-state / printer-state-reasons dashboard
         simulation_control_screen.dart  # the fault-injection control panel
         request_log_screen.dart         # raw IPP requests/responses received, for debugging
+        firmware_details_dialog.dart    # edit dialog for the simulated "new firmware" identity
       main.dart
+    test/
+      firmware_state_machine_test.dart
+      loopback_test.dart       # real IppServer over real HTTP, drives every preset end-to-end
 
   client/                      # Client app (mobile-first)
     lib/
-      discovered_printers_screen.dart   # bonsoir browse results, tap to connect
-      printer_attributes_screen.dart    # Get-Printer-Attributes viewer
-      firmware_update_screen.dart       # check / configure delay / request update / progress
-      identity_screen.dart              # pick simulated requesting-user-name + role (see Auth below)
-      event_log_screen.dart             # raw request/response transcript
+      printer_session.dart     # PrinterSession: one connected Printer's live state + actions
+      simulated_identity.dart  # requesting-user-name + role sent as HTTP Basic Auth
+      client_event_log_entry.dart  # one recorded request/response, for the Log tab
+      ui/
+        discovered_printers_screen.dart   # bonsoir browse results, tap/manual-connect
+        printer_detail_screen.dart        # hosts a PrinterSession across the three tabs below
+        printer_status_screen.dart        # "Status" tab: attributes + check/update in one place
+        printer_settings_screen.dart      # "Settings" tab: identity/role + monitoring cadence
+        event_log_screen.dart             # "Log" tab: raw request/response transcript
       main.dart
+    test/
+      printer_session_test.dart  # drives a real PrinterSession against a real PrinterEngine
+                                  # over real HTTP — the cross-app version of loopback_test.dart
 
-test/                          # or per-package test/ dirs, TBD when we scaffold
+packages/ipp/test/
   ipp_codec_test.dart
-  firmware_state_machine_test.dart
-  scenario_presets_test.dart
-  integration/
-    loopback_test.dart         # Client + Printer app logic in one test process over localhost,
-                                # drives every preset scenario and asserts on Client-visible state
+  ipp_client_transport_test.dart  # ipp://→http:// / ipps://→https:// scheme translation
+packages/fwupdate/test/
+  fwupdate_test.dart
 ```
 
 ## IPP Protocol Subset
@@ -143,6 +161,24 @@ test/                          # or per-package test/ dirs, TBD when we scaffold
 alternative to polling, but it's a large protocol surface on its own. **v1 uses polling only**
 (Client re-issues Get-Printer-Attributes on a timer); Get-Notifications is a possible later
 addition if we want to test event-driven Clients too.
+
+Get-Printer-Attributes honors the `requested-attributes` operation attribute per RFC 8011 —
+if the Client includes it, the response is filtered to just those names (or `'all'`, or an
+unrecognized name simply being absent rather than an error); if omitted, every attribute is
+returned as before.
+
+**Version negotiation**: the Printer defaults to IPP/2.0 (STD92/RFC 8010-8011 actually
+defines IPP/1.1; 2.0 was chosen after a real libcups-based FWUPDATE conformance test failed
+against a 1.1 response) and negotiates down to whatever version the Client's request
+specifies, capped at 2.0 — so a 1.1 Client gets a 1.1 response, and nothing claims a version
+newer than this project actually implements.
+
+**`ipp://`/`ipps://` URIs**: `printer-uri` values and mDNS-discovered addresses use the real
+`ipp`/`ipps` URI schemes (not `http`/`https`) per the IPP URI convention, since that's what a
+real Printer would advertise. `dart:io`'s `HttpClient` only understands `http`/`https`, so
+`IppClientTransport` translates the scheme (`ipp`→`http`, `ipps`→`https`) at the connection
+layer only — the `printer-uri` value sent in the request body keeps the original `ipp://`
+string, since that's what the wire format actually requires.
 
 ### Attributes implemented
 
@@ -176,11 +212,17 @@ remotely, which is a real but separate feature from firmware-update testing.
 ## Discovery
 
 The Printer app advertises `_ipp._tcp.local` via `bonsoir`, with TXT record keys `txtvers`,
-`rp` (empty), `ty` (a name like "FWUPDATE Sim Printer — <scenario>"), and `note` set to the
-currently active scenario name so it's identifiable in a device list without connecting
-first. The Client app browses that service type and lists results with live TXT-record
-updates (so switching scenarios on the Printer updates the Client's list without a manual
-refresh).
+`rp` (`ipp/print`, per the Bonjour Printing Specification convention — used to build the
+resource path of the `printer-uri` the Client connects to), `ty` (a name like "FWUPDATE Sim
+Printer — <scenario>"), and `note` set to the currently active scenario name so it's
+identifiable in a device list without connecting first. The Client app browses that service
+type and lists results with live TXT-record updates (so switching scenarios on the Printer
+updates the Client's list without a manual refresh).
+
+The Printer app listens on a stable default port, **13631**, so its address doesn't churn
+across restarts during a testing session; if that port is already taken (e.g. a previous
+instance still running) it increments and retries, up to 20 attempts, rather than failing to
+start.
 
 TLS is out of scope for v1 (see Non-Goals) — everything runs over plain `_ipp._tcp`/HTTP.
 
@@ -228,6 +270,10 @@ One object holds every injectable fault, editable live from Simulation Control:
 - **Clock state**: normal / unset (forces `unknown` per the §6.3.2 note)
 - **Never-checked**: force all `printer-new-firmware-*` back to `no-value`, as if the
   printer just booted
+- A successful install clears the simulated firmware *availability* itself (not just the
+  runtime `printer-new-firmware-*` status attributes) — so a Client that checks again right
+  after an install correctly sees "nothing new," instead of the just-installed firmware
+  reappearing as newly available because the underlying simulated repository was never told
 - **Per-phase outcome** (Acquisition, Validation, Installation, Activation, Cleanup):
   succeed / fail / hang (never completes, to test Client timeout handling)
 - **Per-phase duration**: seconds to remain `-in-progress` before resolving
@@ -274,7 +320,7 @@ offers named one-tap presets on top of the raw config (still editable afterward)
 
 The spec ties authorization to "Authenticated User" role (Operator/Administrator vs plain
 End User, §2.2) but leaves the actual authentication mechanism to STD92/deployment. For a
-prototype without a real credential store, the Client app's Identity screen lets the tester
+prototype without a real credential store, the Client app's Settings tab lets the tester
 pick a simulated identity (`requesting-user-name` value plus a role tag: Administrator /
 Operator / End User / Unauthenticated) sent via HTTP Basic Auth; the Printer app's auth
 enforcement toggle checks that role against a simple allow-list (Operator/Administrator
@@ -284,22 +330,76 @@ Client's handling of all three documented rejection codes without building real 
 ## Client App Design
 
 1. **Discover** — list of `_ipp(s)._tcp` instances found via `bonsoir`, showing name,
-   host:port, and (if advertised) the active scenario note.
-2. **Connect** — Get-Printer-Attributes on select; shows full attribute set including every
-   `printer-new-firmware-*` value and current `printer-state-reasons`, with out-of-band
-   values (`no-value`/`unknown`) rendered distinctly from real values so it's obvious which
-   case is in play.
-3. **Check for firmware** — sends Check-For-New-Printer-Firmware, then polls
-   Get-Printer-Attributes on an interval until `printer-new-firmware-check-date-time`
-   advances, surfacing the result (available / not available / repository error / unknown).
-4. **Request update** — lets the tester pick immediate / named delay (§6.1.1 keyword) /
-   specific date-time (§6.1.2), sends Update-Printer-Firmware, then polls and renders the
-   live phase (`-in-progress` → `-success`/`-failure`) as a progress indicator, including
-   correctly handling the printer going temporarily unreachable (must retry, not treat as
-   a fatal error, per §4.4's explicit note).
-5. **Event log** — every raw IPP request/response (decoded, human-readable) for the current
-   session, so a discrepancy between "what the Client displayed" and "what the Printer
-   actually sent" is diagnosable immediately.
+   host:port, and (if advertised) the active scenario note; a "Connect manually" button
+   covers networks where mDNS is blocked.
+2. **Connect** — selecting a printer opens a detail screen hosting one `PrinterSession`
+   across three tabs: **Status**, **Log**, and **Settings**.
+
+Once connected, everything is driven by `PrinterSession`, not by explicit per-screen
+requests — see [Automatic status monitoring](#automatic-status-monitoring) below.
+
+### Status tab
+
+Attributes and the firmware check/update flow live together on one screen (they were
+originally two separate tabs; merged because watching "New Firmware status" change in
+response to Check/Update is the whole point, and splitting them made that harder to see):
+
+- Current `printer-state` / `printer-is-accepting-jobs` / `printer-state-reasons`, and the
+  currently-installed firmware (PWG 5100.13 `printer-firmware-*` attributes).
+- A **Check for new Firmware** button (also triggered automatically — see below) and, below
+  it, "New Firmware status": while a check is outstanding this shows a "Checking for new
+  Firmware…" indicator instead of attribute values; once resolved, it always leads with the
+  real `printer-new-firmware-check-date-time` value. That attribute — not
+  `printer-new-firmware-name`'s out-of-band state — is what's shown deliberately: per
+  §6.3.5, `printer-new-firmware-name` being `no-value` means both "never checked" *and*
+  "checked, found nothing," and the two can't be told apart from that attribute alone.
+  `printer-new-firmware-check-date-time` is what actually answers "did a check happen."
+- A compact "when to install" control (one dropdown for immediate / named delay / specific
+  date-time, replacing three tall radio buttons) and an **Update Firmware** button, which
+  lets the tester pick immediate / named delay (§6.1.1 keyword) / specific date-time
+  (§6.1.2), sends Update-Printer-Firmware, then polls and renders the live phase
+  (`-in-progress` → `-success`/`-failure`) as a progress indicator, including correctly
+  handling the printer going temporarily unreachable (must retry, not treat as a fatal
+  error, per §4.4's explicit note).
+
+### Log tab
+
+Every raw IPP request/response (decoded, human-readable) for the current session, so a
+discrepancy between "what the Client displayed" and "what the Printer actually sent" is
+diagnosable immediately.
+
+### Settings tab
+
+Two unrelated kinds of "how this Client behaves" settings, gathered in one place away from
+Status so that tab stays focused on what's actually happening on the printer:
+
+- **Identity/role** — pick a simulated `requesting-user-name` and role (see Identity below).
+- **Monitoring cadence** — how often the background status refresh runs, and how stale
+  `printer-new-firmware-check-date-time` has to be before an automatic re-check fires (see
+  next section). Both are live-tunable; there's no "apply" step.
+
+### Automatic status monitoring
+
+A first version of this gave the tester an auto-refresh on/off switch with a seconds box.
+That was the wrong model: real-world testing showed a human still had to press "Check for
+new Firmware" even with auto-refresh on, because the timer only re-sent
+Get-Printer-Attributes — it never re-triggered an actual check. The redesign treats the two
+concerns as fundamentally different and handles them differently:
+
+- **Get-Printer-Attributes status polling is unconditional**, not a toggle. For as long as a
+  printer is selected, the Client just keeps its view fresh on an interval (default 5s,
+  tunable from Settings) — a "normal" UI doesn't show stale status while you're looking at
+  it, so there's nothing for the tester to turn on.
+- **Check-For-New-Printer-Firmware is sent automatically**, on connect and on every
+  subsequent status-monitor tick, whenever `printer-new-firmware-check-date-time` is
+  `no-value` or `unknown` (never checked, or the printer couldn't tell), or whenever a real
+  timestamp is older than a configurable staleness threshold (default 60 minutes). A
+  printer that reports having checked recently is left alone rather than re-hit on every
+  tick; a retry throttle (1 minute) also prevents hammering a printer whose clock genuinely
+  never gets set.
+
+Both intervals are exposed on the Settings tab so a tester can make either cadence fast
+enough to observe live without waiting out production-realistic timing.
 
 ### Client conformance checklist (what we're actually validating)
 
@@ -316,10 +416,20 @@ Derived from §8.2 plus the behavioral notes in §11:
       links adjacent to the relevant firmware info (§11 recommendation)
 - [ ] Correctly surfaces the three auth rejection codes with actionable messaging
 - [ ] Degrades gracefully when `operations-supported` lacks the FWUPDATE operations
+- [ ] Keeps status current and checks for new Firmware proactively without requiring a human
+      to press a button on every visit (see Automatic status monitoring)
+- [ ] Doesn't misreport "never checked" when `printer-new-firmware-name` is `no-value` but
+      `printer-new-firmware-check-date-time` shows a check actually happened
 
 ## Sequence diagram (Triggered Autonomous Firmware Update)
 
-Reproduces Figure 3 in terms of this project's two apps:
+Reproduces Figure 3 in terms of this project's two apps. The Check-For-New-Printer-Firmware
+step may be sent because the tester pressed the button, or automatically by the Client
+itself (see [Automatic status monitoring](#automatic-status-monitoring)) — the wire sequence
+is identical either way, which is exactly the point: a "normal UI" behaving well shouldn't
+need a human in the loop for it. The background Get-Printer-Attributes status poll also
+keeps running for the life of the session, not just around Check/Update, though it's omitted
+below for clarity:
 
 ```mermaid
 sequenceDiagram
@@ -328,7 +438,7 @@ sequenceDiagram
 
     C->>P: Get-Printer-Attributes
     P-->>C: current + new-firmware-* status
-    C->>P: Check-For-New-Printer-Firmware
+    C->>P: Check-For-New-Printer-Firmware (button press, or automatic if stale/no-value)
     P-->>C: 200 OK (accepted, check runs async)
     loop poll until check-date-time advances
         C->>P: Get-Printer-Attributes

@@ -69,10 +69,11 @@ flutter devices
 flutter run -d <device-id>
 ```
 
-The Printer app binds to an ephemeral port and shows its `ipp://host:port` on its Home tab.
-The Client app finds it automatically via mDNS on the same LAN/Wi-Fi, or you can use its
-"Connect manually" button to type in `host:port` directly — useful if mDNS is blocked on your
-network, or before you've approved macOS's "Local Network" permission prompt.
+The Printer app binds to a stable default port, 13631 (incrementing on conflict if something
+else is already using it), and shows its `ipp://host:port` on its Home tab. The Client app
+finds it automatically via mDNS on the same LAN/Wi-Fi, or you can use its "Connect manually"
+button to type in `host:port` directly — useful if mDNS is blocked on your network, or before
+you've approved macOS's "Local Network" permission prompt.
 
 ## Building release artifacts
 
@@ -99,9 +100,19 @@ flutter build macos / linux / windows   # if you also want a desktop Client buil
 (cd apps/client && flutter test)
 ```
 
-All 32 tests currently pass across the four suites (6 + 6 + 15 + 5). `apps/printer`'s suite
+All 65 tests currently pass across the four suites (14 + 6 + 32 + 13). `apps/printer`'s suite
 includes a real end-to-end loopback test (a real `IppServer` talked to over real HTTP);
-`apps/client`'s suite drives a real `PrinterEngine` from the Printer app the same way.
+`apps/client`'s suite drives a real `PrinterEngine` from the Printer app the same way, using
+the actual `DiscoveredPrinter.toPrinterUri()` code path (an `ipp://` URI, not a hand-written
+`http://` one) so it also exercises `IppClientTransport`'s scheme translation.
+
+Both apps' macOS builds (`flutter build macos`) have been verified to build and run for
+real — including real mDNS advertise/browse and real LAN HTTP — which requires the
+App Sandbox network entitlements and `NSLocalNetworkUsageDescription`/`NSBonjourServices`
+Info.plist keys already checked into `apps/printer/macos/Runner/` and
+`apps/client/macos/Runner/` (and their iOS/Android equivalents). If you strip those out for
+some reason, expect a black screen or a silent local-network permission failure rather than
+a build error.
 
 ## Troubleshooting
 
@@ -112,6 +123,9 @@ includes a real end-to-end loopback test (a real `IppServer` talked to over real
   (`flutter config --jdk-dir=<path>`) or bump the AGP version in
   `apps/client/android/build.gradle` per the message Flutter prints.
 - **CocoaPods not installed**: `flutter build macos`/`ios` will stop with "CocoaPods not
-  installed or not in valid state." Install it (see Prerequisites above) and re-run; this is
-  also why this project's own development environment could only verify the Printer/Client
-  apps via `flutter analyze` and the test suites above, not a full desktop build.
+  installed or not in valid state." Install it (see Prerequisites above) and re-run.
+- **Client can't reach a discovered Printer ("Unsupported scheme ipp")**: this was a real bug
+  fixed during development — `dart:io`'s `HttpClient` only understands `http`/`https`, so
+  connecting requires going through `IppClientTransport`, which translates `ipp://`/`ipps://`
+  to `http://`/`https://` at the connection layer. If you see this error from custom code, it
+  means something is bypassing that transport and calling `HttpClient` directly.
