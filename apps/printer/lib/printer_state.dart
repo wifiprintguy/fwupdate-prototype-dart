@@ -740,6 +740,15 @@ class PrinterEngine extends ChangeNotifier {
       _newFirmwareOutOfBand = const IppNoValue();
       checkDateTime = null;
       _stateReasons.remove(FwStateReason.newFirmwareAvailable);
+
+      // Without this, SimulationConfig still says the (now-installed)
+      // Firmware is available, so the very next discovery — another
+      // Check-For-New-Printer-Firmware, any Simulation Control edit, or an
+      // `auto`-policy cycle — would immediately "rediscover" the exact
+      // same Firmware as newly available again via _performDiscovery().
+      // A real repository wouldn't keep offering what a Printer just
+      // installed, so neither should the simulated one.
+      _config = _config.copyWith(firmwareAvailable: false, clearFirmwareInfo: true);
     }
 
     _stateReasons

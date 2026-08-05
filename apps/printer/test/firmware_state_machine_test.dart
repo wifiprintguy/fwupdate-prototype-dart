@@ -274,5 +274,35 @@ void main() {
       // Firmware itself already activated successfully.
       expect(engine.currentFirmwareVersion, '9.0.0');
     });
+
+    test(
+      'a successful install does not resurface as newly-available on the next discovery',
+      () async {
+        engine.replaceConfig(
+          SimulationConfig(
+            firmwareAvailable: true,
+            firmwareInfo: FirmwareInfo.simple(
+              name: 'main-controller',
+              stringVersion: '4.2.0',
+              urgency: NewFirmwareUrgency.security,
+            ),
+            phaseDuration: const Duration(milliseconds: 10),
+          ),
+        );
+
+        await engine.debugRunPipelineToCompletion();
+        expect(engine.newFirmware, isNull);
+        expect(engine.config.firmwareAvailable, isFalse);
+
+        // Anything that re-runs discovery afterward — another
+        // Simulation Control edit, or a real Check-For-New-Printer-Firmware
+        // — must not "rediscover" the Firmware that was just installed.
+        engine.updateConfig((c) => c.copyWith(discoveryDelay: const Duration(seconds: 1)));
+
+        expect(engine.newFirmware, isNull);
+        expect(engine.newFirmwareOutOfBandState, FwOutOfBandState.neverChecked);
+        expect(engine.stateReasons, isNot(contains(FwStateReason.newFirmwareAvailable)));
+      },
+    );
   });
 }

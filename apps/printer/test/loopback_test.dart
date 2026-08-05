@@ -304,6 +304,45 @@ void main() {
       expect(attrs.printerAttributes[FwStatusAttr.newFirmwareName]!.value, isA<IppNoValue>());
     });
 
+    test(
+      'checking again after a successful install does not resurface the same Firmware',
+      () async {
+        await send(
+          buildUpdatePrinterFirmwareRequest(
+            printerUri: printerUri.toString(),
+            requestId: nextRequestId++,
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+
+        // Exactly the real workflow: after an update finishes, a Client
+        // naturally checks again to confirm nothing else is pending.
+        await send(
+          buildCheckForNewPrinterFirmwareRequest(
+            printerUri: printerUri.toString(),
+            requestId: nextRequestId++,
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        final attrs = await send(
+          buildGetPrinterAttributesRequest(
+            printerUri: printerUri.toString(),
+            requestId: nextRequestId++,
+          ),
+        );
+        expect(
+          attrs.printerAttributes[FwStatusAttr.newFirmwareName]!.value,
+          isA<IppNoValue>(),
+          reason: 'the just-installed 4.0.0 must not reappear as newly available',
+        );
+        expect(
+          attrs.printerAttributes['printer-state-reasons']!.values.map((v) => v.toString()),
+          isNot(contains(FwStateReason.newFirmwareAvailable)),
+        );
+      },
+    );
+
     test('rejects an unsupported delay-update-until value', () async {
       engine.updateConfig(
         (c) => c.copyWith(rejectedDelayUpdateUntilValue: DelayUpdateUntil.weekend),
