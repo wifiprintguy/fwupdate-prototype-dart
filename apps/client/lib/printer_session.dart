@@ -22,6 +22,8 @@ class PrinterSession extends ChangeNotifier {
     required this.identity,
     String? displayName,
     this.pollInterval = const Duration(seconds: 2),
+    this.statusMonitorInterval = const Duration(seconds: 5),
+    this.autoCheckStaleThreshold = const Duration(hours: 1),
   }) : displayName = displayName ?? printerUri.host;
 
   final Uri printerUri;
@@ -33,6 +35,30 @@ class PrinterSession extends ChangeNotifier {
   /// cadence to observe a fast simulated pipeline complete.
   final Duration pollInterval;
 
+  /// How often to refresh attributes for as long as this printer is open —
+  /// unconditional, not something the tester toggles on/off: a "normal"
+  /// Client UI just doesn't show stale status while you're looking at it.
+  /// The cadence itself is tunable from the Settings tab, hence mutable.
+  Duration statusMonitorInterval;
+
+  /// How stale `printer-new-firmware-check-date-time` has to be before this
+  /// Client decides to proactively send Check-For-New-Printer-Firmware on
+  /// its own, mirroring how a well-behaved real Client would periodically
+  /// re-check rather than either spamming the operation or never running
+  /// it unless a human clicks a button. Tunable from the Settings tab.
+  Duration autoCheckStaleThreshold;
+
+  void setStatusMonitorInterval(Duration interval) {
+    statusMonitorInterval = interval;
+    _startStatusMonitor();
+    _notify();
+  }
+
+  void setAutoCheckStaleThreshold(Duration threshold) {
+    autoCheckStaleThreshold = threshold;
+    _notify();
+  }
+
   final IppClientTransport _transport = IppClientTransport();
   int _nextRequestId = 1;
 
@@ -41,26 +67,67 @@ class PrinterSession extends ChangeNotifier {
   bool isBusy = false;
   String? lastError;
 
+  /// True from the moment this session sends Check-For-New-Printer-Firmware
+  /// — including the Client's own automatic background checks (see
+  /// [_maybeAutoCheck]), which nobody clicked a button for — until polling
+  /// for its result settles. Lets the UI show "checking" instead of
+  /// `printer-new-firmware-name`'s ambiguous `no-value`, which per FWUPDATE
+  /// §6.3.5 means both "never checked" *and* "checked, nothing available"
+  /// on the wire and can't be told apart from that attribute alone.
+  bool isCheckingForFirmware = false;
+
   Timer? _pollTimer;
   bool get isPolling => _pollTimer != null;
 
-  /// A separate, user-controlled continuous refresh — independent of
-  /// [isPolling], which only runs while a check/update this session itself
-  /// triggered is resolving. This exists because nothing else in this
-  /// session watches for changes made a different way (e.g. directly via
-  /// the Printer app's Simulation Control screen) — without it, the only
-  /// way to see those is a manual pull-to-refresh or reopening the printer.
-  Timer? _autoRefreshTimer;
-  bool get isAutoRefreshing => _autoRefreshTimer != null;
-  Duration autoRefreshInterval = const Duration(seconds: 10);
+  /// Runs for as long as this session exists — see [statusMonitorInterval].
+  /// Distinct from [_pollTimer], which only runs while a check/update this
+  /// session itself triggered is resolving and stops once it does; this one
+  /// never stops on its own, and each tick also re-evaluates
+  /// [_maybeAutoCheck] so a newly-stale check-date-time gets acted on
+  /// without needing to leave and reopen the printer.
+  Timer? _statusMonitorTimer;
 
-  void setAutoRefreshEnabled(bool enabled, {Duration? interval}) {
-    if (interval != null) autoRefreshInterval = interval;
-    _autoRefreshTimer?.cancel();
-    _autoRefreshTimer = enabled
-        ? Timer.periodic(autoRefreshInterval, (_) => refreshAttributes(silent: true))
-        : null;
-    _notify();
+  /// Throttles [_maybeAutoCheck] so a persistently no-value/unknown
+  /// check-date-time (e.g. the clock genuinely isn't set) doesn't cause a
+  /// fresh Check-For-New-Printer-Firmware on every single monitor tick.
+  DateTime? _lastAutoCheckAttempt;
+  static const _autoCheckRetryThrottle = Duration(minutes: 1);
+
+  void _startStatusMonitor() {
+    _statusMonitorTimer?.cancel();
+    _statusMonitorTimer = Timer.periodic(statusMonitorInterval, (_) => _statusMonitorTick());
+  }
+
+  Future<void> _statusMonitorTick() async {
+    if (isPolling) return; // Already refreshing/watching via _pollTick.
+    await refreshAttributes(silent: true);
+    _maybeAutoCheck();
+  }
+
+  /// Sends Check-For-New-Printer-Firmware on its own when
+  /// `printer-new-firmware-check-date-time` indicates the Printer has
+  /// never checked, couldn't tell last time (`unknown`), or hasn't checked
+  /// in over [autoCheckStaleThreshold] — but not otherwise, so a Printer
+  /// that already checked "recently" isn't hit with a redundant request
+  /// just because its status happens to be on screen.
+  void _maybeAutoCheck() {
+    if (_awaitingCheckResult || isPolling) return;
+    final now = DateTime.now().toUtc();
+    final lastAttempt = _lastAutoCheckAttempt;
+    if (lastAttempt != null && now.difference(lastAttempt) < _autoCheckRetryThrottle) {
+      return;
+    }
+
+    final value = _attrs[FwStatusAttr.newFirmwareCheckDateTime]?.value;
+    final isStale = switch (value) {
+      null || IppNoValue() || IppUnknown() => true,
+      IppDateTime() => now.difference(value.toDateTimeUtc()) > autoCheckStaleThreshold,
+      _ => false,
+    };
+    if (!isStale) return;
+
+    _lastAutoCheckAttempt = now;
+    unawaited(checkForNewFirmware(silent: true));
   }
 
   /// Unlike the install pipeline, FWUPDATE's Discovery phase has no
@@ -121,6 +188,11 @@ class PrinterSession extends ChangeNotifier {
   FirmwareInfo? get newFirmware => FirmwareInfo.tryParse(_attrs);
   FwOutOfBandState get newFirmwareState => FwOutOfBandState.of(_attrs);
 
+  DateTime? get lastCheckDateTime {
+    final value = _attrs[FwStatusAttr.newFirmwareCheckDateTime]?.value;
+    return value is IppDateTime ? value.toDateTimeUtc() : null;
+  }
+
   String? get delayedUntilKeyword {
     final attr = _attrs[FwStatusAttr.newFirmwareDelayedUntil];
     return attr != null && !attr.isOutOfBand ? attr.value.toString() : null;
@@ -149,7 +221,11 @@ class PrinterSession extends ChangeNotifier {
 
   // --- Actions -------------------------------------------------------
 
-  Future<void> connect() => refreshAttributes();
+  Future<void> connect() async {
+    await refreshAttributes();
+    _maybeAutoCheck();
+    _startStatusMonitor();
+  }
 
   /// [silent] skips the [isBusy] toggle — used by the auto-refresh timer so
   /// buttons that disable while busy don't flicker on every tick.
@@ -176,8 +252,11 @@ class PrinterSession extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> checkForNewFirmware() async {
-    isBusy = true;
+  /// [silent] skips the [isBusy] toggle — used by the auto-refresh timer so
+  /// buttons that disable while busy don't flicker on every tick.
+  Future<void> checkForNewFirmware({bool silent = false}) async {
+    isCheckingForFirmware = true;
+    if (!silent) isBusy = true;
     _notify();
     try {
       _checkDateTimeBaseline = _attrs[FwStatusAttr.newFirmwareCheckDateTime]?.value.toString();
@@ -192,11 +271,14 @@ class PrinterSession extends ChangeNotifier {
       if (response.isSuccessful) {
         _awaitingCheckResult = true;
         _startPolling();
+      } else {
+        isCheckingForFirmware = false;
       }
     } catch (e) {
       lastError = '$e';
+      isCheckingForFirmware = false;
     }
-    isBusy = false;
+    if (!silent) isBusy = false;
     _notify();
   }
 
@@ -233,6 +315,7 @@ class PrinterSession extends ChangeNotifier {
     _pollTimer?.cancel();
     _pollTimer = null;
     _checkGracePollsRemaining = null;
+    isCheckingForFirmware = false;
     _notify();
   }
 
@@ -314,7 +397,7 @@ class PrinterSession extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _pollTimer?.cancel();
-    _autoRefreshTimer?.cancel();
+    _statusMonitorTimer?.cancel();
     _transport.close();
     super.dispose();
   }

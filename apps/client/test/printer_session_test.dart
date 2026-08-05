@@ -153,43 +153,138 @@ void main() {
     expect(session.lastError, contains('client-error-not-authorized'));
   });
 
-  group('auto-refresh', () {
+  group('status monitoring', () {
+    // The persistent status monitor (statusMonitorInterval) always runs
+    // once connected — there's no on/off switch to test, only that it
+    // actually keeps attributes fresh and never flickers isBusy.
     test('picks up changes made independently of any check/update this session triggered', () async {
-      await session.connect();
-      expect(session.currentFirmwareVersion, '1.0.0');
+      final fastSession = PrinterSession(
+        printerUri: printerUri,
+        identity: identity,
+        pollInterval: const Duration(milliseconds: 30),
+        statusMonitorInterval: const Duration(milliseconds: 20),
+      );
+      addTearDown(fastSession.dispose);
 
-      session.setAutoRefreshEnabled(true, interval: const Duration(milliseconds: 20));
-      expect(session.isAutoRefreshing, isTrue);
+      await fastSession.connect();
+      expect(fastSession.currentFirmwareVersion, '1.0.0');
 
       // Simulates a change made directly on the Printer (e.g. via its own
       // Simulation Control screen), not through any request this session
-      // sent — the only way to observe it is the auto-refresh timer.
+      // sent — the only way to observe it is the status monitor.
       engine.setCurrentFirmwareVersion('2.5.0');
 
       await _waitUntil(
-        () => session.currentFirmwareVersion == '2.5.0',
+        () => fastSession.currentFirmwareVersion == '2.5.0',
         timeout: const Duration(seconds: 2),
       );
     });
 
     test('does not toggle isBusy on each tick', () async {
-      await session.connect();
-      session.setAutoRefreshEnabled(true, interval: const Duration(milliseconds: 20));
+      final fastSession = PrinterSession(
+        printerUri: printerUri,
+        identity: identity,
+        pollInterval: const Duration(milliseconds: 30),
+        statusMonitorInterval: const Duration(milliseconds: 20),
+      );
+      addTearDown(fastSession.dispose);
+      await fastSession.connect();
 
       final busyObserved = <bool>[];
-      session.addListener(() => busyObserved.add(session.isBusy));
+      fastSession.addListener(() => busyObserved.add(fastSession.isBusy));
       await Future<void>.delayed(const Duration(milliseconds: 100));
 
       expect(busyObserved, isNot(contains(true)));
     });
 
-    test('stops refreshing once disabled', () async {
+    test('setStatusMonitorInterval takes effect immediately', () async {
       await session.connect();
-      session.setAutoRefreshEnabled(true, interval: const Duration(milliseconds: 20));
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      session.setStatusMonitorInterval(const Duration(milliseconds: 20));
 
-      session.setAutoRefreshEnabled(false);
-      expect(session.isAutoRefreshing, isFalse);
+      engine.setCurrentFirmwareVersion('3.0.0');
+
+      await _waitUntil(
+        () => session.currentFirmwareVersion == '3.0.0',
+        timeout: const Duration(seconds: 2),
+      );
+    });
+  });
+
+  group('automatic Check-For-New-Printer-Firmware', () {
+    bool sentAutomaticCheck(PrinterSession s) =>
+        s.eventLog.any((e) => e.label == 'Check-For-New-Printer-Firmware');
+
+    test('is sent on connect when check-date-time is no-value (never checked)', () async {
+      engine.resetToNeverChecked();
+
+      await session.connect();
+
+      await _waitUntil(() => sentAutomaticCheck(session), timeout: const Duration(seconds: 2));
+    });
+
+    test('is not sent on connect when the Printer reports a recent check', () async {
+      engine.checkDateTime = DateTime.now().toUtc();
+
+      await session.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(sentAutomaticCheck(session), isFalse);
+    });
+
+    test('is sent when the last check is older than autoCheckStaleThreshold', () async {
+      engine.checkDateTime = DateTime.now().toUtc().subtract(const Duration(milliseconds: 200));
+      final staleSoonSession = PrinterSession(
+        printerUri: printerUri,
+        identity: identity,
+        pollInterval: const Duration(milliseconds: 30),
+        autoCheckStaleThreshold: const Duration(milliseconds: 50),
+      );
+      addTearDown(staleSoonSession.dispose);
+
+      await staleSoonSession.connect();
+
+      await _waitUntil(
+        () => sentAutomaticCheck(staleSoonSession),
+        timeout: const Duration(seconds: 2),
+      );
+    });
+  });
+
+  // printer-new-firmware-name's no-value is ambiguous on the wire between
+  // "never checked" and "checked, nothing available" (FWUPDATE §6.3.5) —
+  // isCheckingForFirmware is the Client's own record of an in-flight check,
+  // so the UI can say "checking…" instead of showing that ambiguous
+  // no-value while an automatic background check is quietly running.
+  group('isCheckingForFirmware', () {
+    test('reflects an automatic background check with no button press', () async {
+      engine.resetToNeverChecked();
+
+      await session.connect();
+      expect(session.isCheckingForFirmware, isTrue);
+
+      await _waitUntil(() => !session.isCheckingForFirmware, timeout: const Duration(seconds: 2));
+    });
+
+    test('reflects a manually-triggered check', () async {
+      // A recent check-date-time so connect()'s own automatic check (see
+      // the group above) doesn't fire and confound this assertion.
+      engine.checkDateTime = DateTime.now().toUtc();
+
+      await session.connect();
+      expect(session.isCheckingForFirmware, isFalse);
+
+      // printer-new-firmware-check-date-time only has decisecond (100ms)
+      // resolution on the wire (see IppDateTime.fromDateTimeUtc) — without
+      // this gap, this check could land in the same decisecond as the one
+      // connect() just recorded, and the grace-poll logic (correctly) would
+      // never see check-date-time change, so it would poll forever.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
+      final checkFuture = session.checkForNewFirmware();
+      expect(session.isCheckingForFirmware, isTrue);
+      await checkFuture;
+
+      await _waitUntil(() => !session.isCheckingForFirmware, timeout: const Duration(seconds: 2));
     });
   });
 }

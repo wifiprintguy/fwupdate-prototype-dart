@@ -22,19 +22,6 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
   _DelayChoice _delayChoice = _DelayChoice.immediate;
   String _delayKeyword = DelayUpdateUntil.evening;
   DateTime _delayDateTime = DateTime.now().add(const Duration(minutes: 1));
-  late final TextEditingController _autoRefreshSecondsController;
-
-  @override
-  void initState() {
-    super.initState();
-    _autoRefreshSecondsController = TextEditingController(text: '10');
-  }
-
-  @override
-  void dispose() {
-    _autoRefreshSecondsController.dispose();
-    super.dispose();
-  }
 
   static String _printerStateLabel(int? state) => switch (state) {
     3 => 'idle',
@@ -43,12 +30,6 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
     null => 'unknown',
     _ => 'unknown ($state)',
   };
-
-  void _applyAutoRefreshSeconds(PrinterSession session, {required bool enabled}) {
-    final seconds = int.tryParse(_autoRefreshSecondsController.text.trim());
-    if (seconds == null || seconds <= 0) return;
-    session.setAutoRefreshEnabled(enabled, interval: Duration(seconds: seconds));
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -143,31 +124,6 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
               label: const Text('Check for new Firmware'),
             ),
           ),
-          Row(
-            children: [
-              Switch(
-                value: session.isAutoRefreshing,
-                onChanged: (enabled) => _applyAutoRefreshSeconds(session, enabled: enabled),
-              ),
-              const Text('Auto-refresh every'),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 56,
-                child: TextField(
-                  controller: _autoRefreshSecondsController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(isDense: true, suffixText: 's'),
-                  onSubmitted: (_) =>
-                      _applyAutoRefreshSeconds(session, enabled: session.isAutoRefreshing),
-                  onChanged: (_) {
-                    if (session.isAutoRefreshing) {
-                      _applyAutoRefreshSeconds(session, enabled: true);
-                    }
-                  },
-                ),
-              ),
-            ],
-          ),
           const SizedBox(height: 12),
           _SectionCard(title: 'New Firmware status', children: _newFirmwareLines(session)),
           _DelaySelector(
@@ -206,7 +162,7 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
               ),
             ),
           const SizedBox(height: 12),
-          if (session.isPolling)
+          if (session.isPolling && !session.isCheckingForFirmware)
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -262,19 +218,41 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
   }
 
   List<Widget> _newFirmwareLines(PrinterSession session) {
+    if (session.isCheckingForFirmware) {
+      return const [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 12),
+            Text('Checking for new Firmware…'),
+          ],
+        ),
+      ];
+    }
+    // printer-new-firmware-name's no-value is genuinely ambiguous on the
+    // wire (FWUPDATE §6.3.5): it means both "never checked" and "checked,
+    // nothing available". Rather than guessing which one it means, show
+    // printer-new-firmware-check-date-time itself — the attribute that
+    // actually answers that question — the same way every other attribute
+    // in this app is shown: by its real IPP name and real value.
+    final checkDateTime = session.lastCheckDateTime;
+    final checkDateTimeLine = Text(
+      'printer-new-firmware-check-date-time: '
+      '${checkDateTime != null ? checkDateTime.toLocal() : 'no-value'}',
+    );
+
     final info = session.newFirmware;
     if (info == null) {
       return [
+        checkDateTimeLine,
         Text(
-          switch (session.newFirmwareState) {
-            FwOutOfBandState.neverChecked => 'no-value — never checked, or nothing available',
-            FwOutOfBandState.unknown => 'unknown — repository unreachable or errored',
-            FwOutOfBandState.none => 'no-value',
-          },
+          'printer-new-firmware-name: ${session.newFirmwareState == FwOutOfBandState.unknown ? 'unknown' : 'no-value'}',
         ),
       ];
     }
     return [
+      checkDateTimeLine,
       Text('name: ${info.names.join(', ')}'),
       Text('string-version: ${info.stringVersions.join(', ')}'),
       Text('urgency: ${info.urgency}'),

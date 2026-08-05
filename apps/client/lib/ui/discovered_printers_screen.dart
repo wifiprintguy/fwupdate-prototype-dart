@@ -1,9 +1,6 @@
 import 'package:discovery/discovery.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
-import '../simulated_identity.dart';
-import 'identity_screen.dart';
 import 'printer_detail_screen.dart';
 
 /// The Client app's home screen: browse for `_ipp._tcp` Printer-app
@@ -77,20 +74,7 @@ class _DiscoveredPrintersScreenState extends State<DiscoveredPrintersScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('FWUPDATE Client'),
-        actions: [
-          Consumer<SimulatedIdentity>(
-            builder: (context, identity, _) => IconButton(
-              icon: const Icon(Icons.badge_outlined),
-              tooltip: 'Identity: ${identity.requestingUserName} (${identity.role.name})',
-              onPressed: () => Navigator.of(
-                context,
-              ).push(MaterialPageRoute(builder: (_) => const IdentityScreen())),
-            ),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('FWUPDATE Client')),
       body: _error != null
           ? Center(child: Padding(padding: const EdgeInsets.all(16), child: Text(_error!)))
           : _printers.isEmpty
