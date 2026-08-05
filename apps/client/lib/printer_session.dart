@@ -44,6 +44,25 @@ class PrinterSession extends ChangeNotifier {
   Timer? _pollTimer;
   bool get isPolling => _pollTimer != null;
 
+  /// A separate, user-controlled continuous refresh — independent of
+  /// [isPolling], which only runs while a check/update this session itself
+  /// triggered is resolving. This exists because nothing else in this
+  /// session watches for changes made a different way (e.g. directly via
+  /// the Printer app's Simulation Control screen) — without it, the only
+  /// way to see those is a manual pull-to-refresh or reopening the printer.
+  Timer? _autoRefreshTimer;
+  bool get isAutoRefreshing => _autoRefreshTimer != null;
+  Duration autoRefreshInterval = const Duration(seconds: 10);
+
+  void setAutoRefreshEnabled(bool enabled, {Duration? interval}) {
+    if (interval != null) autoRefreshInterval = interval;
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = enabled
+        ? Timer.periodic(autoRefreshInterval, (_) => refreshAttributes(silent: true))
+        : null;
+    _notify();
+  }
+
   /// Unlike the install pipeline, FWUPDATE's Discovery phase has no
   /// `-in-progress` `printer-state-reasons` keyword of its own (§7.3 only
   /// defines that triple for the install phases) — so the only way to tell
@@ -132,9 +151,13 @@ class PrinterSession extends ChangeNotifier {
 
   Future<void> connect() => refreshAttributes();
 
-  Future<void> refreshAttributes() async {
-    isBusy = true;
-    _notify();
+  /// [silent] skips the [isBusy] toggle — used by the auto-refresh timer so
+  /// buttons that disable while busy don't flicker on every tick.
+  Future<void> refreshAttributes({bool silent = false}) async {
+    if (!silent) {
+      isBusy = true;
+      _notify();
+    }
     try {
       final request = buildGetPrinterAttributesRequest(
         printerUri: printerUri.toString(),
@@ -149,7 +172,7 @@ class PrinterSession extends ChangeNotifier {
       isConnected = false;
       lastError = '$e';
     }
-    isBusy = false;
+    if (!silent) isBusy = false;
     _notify();
   }
 
@@ -291,6 +314,7 @@ class PrinterSession extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _pollTimer?.cancel();
+    _autoRefreshTimer?.cancel();
     _transport.close();
     super.dispose();
   }

@@ -42,7 +42,7 @@ class IppClientTransport {
     late final HttpClientRequest httpRequest;
     try {
       httpRequest = await _httpClient
-          .postUrl(printerUri)
+          .postUrl(_httpUriFor(printerUri))
           .timeout(timeout);
     } on Exception catch (e) {
       throw IppTransportException('Failed to connect to $printerUri', cause: e);
@@ -95,6 +95,20 @@ class IppClientTransport {
       );
     }
   }
+
+  /// IPP is HTTP underneath (RFC 8010) — `ipp`/`ipps` are just the URI
+  /// scheme convention for "this is an IPP endpoint", not something
+  /// `dart:io`'s [HttpClient] (or any real HTTP stack) understands as a
+  /// connection scheme. Real IPP clients translate `ipp`→`http` and
+  /// `ipps`→`https` before actually connecting, while still sending the
+  /// original `ipp://` form as the `printer-uri` attribute *value* inside
+  /// the request body — that translation belongs here (connection-level),
+  /// not wherever `printerUri` was constructed.
+  Uri _httpUriFor(Uri uri) => switch (uri.scheme) {
+    'ipp' => uri.replace(scheme: 'http'),
+    'ipps' => uri.replace(scheme: 'https'),
+    _ => uri,
+  };
 
   Future<List<int>> _readAll(HttpClientResponse response) async {
     final bytes = <int>[];

@@ -3,6 +3,16 @@
 // the loopback idea in apps/printer/test/loopback_test.dart, proving the
 // two apps' independently-developed IPP layers actually agree with each
 // other on the wire, not just against their own package's fixtures.
+//
+// printerUri is built via DiscoveredPrinter.toPrinterUri() rather than a
+// hand-written `http://` string — that's the real code path the Client app
+// uses after mDNS discovery, and it produces an `ipp://` URI (per the IPP
+// URI convention), not `http://`. An earlier version of this test used
+// `Uri.parse('http://...')` directly, which meant it never actually
+// exercised IppClientTransport's ipp/ipps-to-http/https scheme translation
+// — masking a real bug where every genuine discovered-printer connection
+// failed with "Unsupported scheme ipp".
+import 'package:discovery/discovery.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fwupdate/fwupdate.dart';
 import 'package:fwupdate_client/printer_session.dart';
@@ -23,7 +33,12 @@ void main() {
     server = IppServer(engine.handleRequest);
     engine.server = server;
     final port = await server.start(port: 0);
-    printerUri = Uri.parse('http://127.0.0.1:$port/ipp/print');
+    printerUri = DiscoveredPrinter(
+      name: 'Test Printer',
+      host: '127.0.0.1',
+      port: port,
+      attributes: const {},
+    ).toPrinterUri();
     identity = SimulatedIdentity();
     session = PrinterSession(
       printerUri: printerUri,
@@ -136,6 +151,46 @@ void main() {
     await session.checkForNewFirmware();
 
     expect(session.lastError, contains('client-error-not-authorized'));
+  });
+
+  group('auto-refresh', () {
+    test('picks up changes made independently of any check/update this session triggered', () async {
+      await session.connect();
+      expect(session.currentFirmwareVersion, '1.0.0');
+
+      session.setAutoRefreshEnabled(true, interval: const Duration(milliseconds: 20));
+      expect(session.isAutoRefreshing, isTrue);
+
+      // Simulates a change made directly on the Printer (e.g. via its own
+      // Simulation Control screen), not through any request this session
+      // sent — the only way to observe it is the auto-refresh timer.
+      engine.setCurrentFirmwareVersion('2.5.0');
+
+      await _waitUntil(
+        () => session.currentFirmwareVersion == '2.5.0',
+        timeout: const Duration(seconds: 2),
+      );
+    });
+
+    test('does not toggle isBusy on each tick', () async {
+      await session.connect();
+      session.setAutoRefreshEnabled(true, interval: const Duration(milliseconds: 20));
+
+      final busyObserved = <bool>[];
+      session.addListener(() => busyObserved.add(session.isBusy));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(busyObserved, isNot(contains(true)));
+    });
+
+    test('stops refreshing once disabled', () async {
+      await session.connect();
+      session.setAutoRefreshEnabled(true, interval: const Duration(milliseconds: 20));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      session.setAutoRefreshEnabled(false);
+      expect(session.isAutoRefreshing, isFalse);
+    });
   });
 }
 
