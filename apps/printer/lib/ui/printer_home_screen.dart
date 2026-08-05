@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:fwupdate/fwupdate.dart';
+import 'package:ipp/ipp.dart';
 import 'package:provider/provider.dart';
 
 import '../printer_state.dart';
@@ -128,6 +128,13 @@ class PrinterHomeScreen extends StatelessWidget {
   }
 }
 
+/// Renders every `printer-new-firmware-*` attribute (§6.3.2, §6.3.5-6.3.11)
+/// individually and by its real IPP name, built directly from
+/// [PrinterEngine.newFirmwareStatusAttributes] — the exact list a
+/// Get-Printer-Attributes response would carry — so this can't drift from
+/// what a real Client actually receives, and out-of-band values
+/// (`no-value`/`unknown`) are visible per-attribute rather than folded into
+/// one blanket message for the whole group.
 class _NewFirmwareSection extends StatelessWidget {
   const _NewFirmwareSection({required this.engine});
 
@@ -135,26 +142,24 @@ class _NewFirmwareSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final info = engine.newFirmware;
-    if (info == null) {
-      final state = engine.newFirmwareOutOfBandState;
-      return Text(switch (state) {
-        FwOutOfBandState.neverChecked => 'no-value (never checked / nothing available)',
-        FwOutOfBandState.unknown => 'unknown (repository unreachable or errored)',
-        FwOutOfBandState.none => 'no-value',
-      });
-    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SelectableText('name: ${info.names.join(', ')}'),
-        SelectableText('string-version: ${info.stringVersions.join(', ')}'),
-        SelectableText('urgency: ${info.urgency}'),
-        SelectableText('k-octets: ${info.kOctets}'),
-        SelectableText('patches: ${info.patches.join(', ')}'),
-        if (info.infoUri != null) SelectableText('info-uri: ${info.infoUri}'),
+        for (final attribute in engine.newFirmwareStatusAttributes)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: SelectableText('${attribute.name}: ${_formatAttributeValue(attribute)}'),
+          ),
       ],
     );
+  }
+
+  static String _formatAttributeValue(IppAttribute attribute) {
+    final value = attribute.value;
+    if (value is IppNoValue) return 'no-value';
+    if (value is IppUnknown) return 'unknown';
+    if (value is IppDateTime) return value.toDateTimeUtc().toLocal().toString();
+    return attribute.values.map((v) => v.toString()).join(', ');
   }
 }
 

@@ -42,6 +42,30 @@ Future<String> _localNetworkAddress() async {
   return Platform.localHostname;
 }
 
+/// The port this app tries first, so it's the same across runs (handy for
+/// bookmarking `ipp://host:13631/ipp/print`, or the Client app's "Connect
+/// manually" field) rather than a fresh ephemeral port every launch.
+const int defaultPrinterPort = 13631;
+
+/// How many ports past [defaultPrinterPort] to try before giving up.
+const int _maxPortAttempts = 20;
+
+/// Binds [server] to [defaultPrinterPort], or the next free port above it if
+/// that one's taken (e.g. another instance of this app is already running).
+Future<int> _bindServer(IppServer server) async {
+  var port = defaultPrinterPort;
+  for (var attempt = 1; attempt < _maxPortAttempts; attempt++) {
+    try {
+      return await server.start(port: port);
+    } on SocketException {
+      port++;
+    }
+  }
+  // Final attempt: let any failure surface normally rather than swallowing
+  // it silently after exhausting the fallback range.
+  return server.start(port: port);
+}
+
 void main() {
   // Deliberately call runApp() immediately, before starting the IPP server
   // or the mDNS advertiser. Both of those are native, fallible calls (e.g.
@@ -94,7 +118,7 @@ class _PrinterStartupState extends State<PrinterStartup> {
   Future<(String, int)> _start() async {
     final server = IppServer(_engine.handleRequest, onOtherRequest: _engine.handleOtherRequest);
     _engine.server = server;
-    final port = await server.start();
+    final port = await _bindServer(server);
     final host = await _localNetworkAddress();
     _engine.configureServerAddress(host, port);
 

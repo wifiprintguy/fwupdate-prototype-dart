@@ -72,7 +72,7 @@ class PrinterEngine extends ChangeNotifier {
   // how PWG 5100.13 defines these as 1setOf attributes — see
   // [CurrentFirmwareAttr]. In practice this project's UI only ever edits a
   // single component, so [setCurrentFirmwareVersion] collapses to a
-  // one-element list; a successful install (see [concludePipeline]) can
+  // one-element list; a successful install (see [concludeAfterCleanup]) can
   // still carry over a multi-component identity if the "new" Firmware was
   // configured with one.
 
@@ -186,6 +186,16 @@ class PrinterEngine extends ChangeNotifier {
       : (_newFirmwareOutOfBand is IppUnknown
             ? FwOutOfBandState.unknown
             : FwOutOfBandState.neverChecked);
+
+  /// The exact `printer-new-firmware-*` attributes (§6.3.2, §6.3.5-6.3.11)
+  /// this engine would put on a Get-Printer-Attributes response right now,
+  /// including their out-of-band state — exposed so the UI can render each
+  /// one individually and stay truthful to the wire by construction,
+  /// rather than maintaining a second, potentially-drifting summary.
+  List<IppAttribute> get newFirmwareStatusAttributes => [
+    IppAttribute.single(FwStatusAttr.newFirmwareCheckDateTime, _checkDateTimeValue()),
+    ..._newFirmwareDataAttributes(),
+  ];
 
   String? delayedUntilKeyword;
   DateTime? delayedUntilDateTime;
@@ -340,13 +350,18 @@ class PrinterEngine extends ChangeNotifier {
       return IppMessage.statusResponse(statusCode: authRejection, requestId: requestId);
     }
 
+    // §6.3.2: the check-date-time is when the Printer last *attempted* to
+    // check, which is now — the moment this request was received — even
+    // though the actual repository query/result is simulated as taking
+    // `discoveryDelay` longer. Record it before building the response so
+    // the immediate ack already reflects it.
+    checkDateTime = DateTime.now().toUtc();
+
     // Per §5.1: "The Printer responds immediately before completing the
-    // check" — the response below reflects the *current* cached values;
-    // the actual (re-)discovery happens after `discoveryDelay`.
-    final responseAttributes = [
-      IppAttribute.single(FwStatusAttr.newFirmwareCheckDateTime, _checkDateTimeValue()),
-      ..._newFirmwareDataAttributes(),
-    ];
+    // check" — the firmware-data attributes below still reflect the
+    // *previous* cached values; the actual (re-)discovery of what's
+    // available happens after `discoveryDelay`.
+    final responseAttributes = newFirmwareStatusAttributes;
     _scheduleDiscovery();
 
     return IppMessage.statusResponse(
@@ -484,12 +499,24 @@ class PrinterEngine extends ChangeNotifier {
     final myRun = ++_discoveryRunId;
     Future.delayed(config.discoveryDelay, () {
       if (myRun != _discoveryRunId) return;
-      _performDiscovery();
+      // checkDateTime was already recorded when the request arrived (see
+      // _handleCheckForNewPrinterFirmware) — don't overwrite it with the
+      // later time this delayed result actually became available.
+      _performDiscovery(recordCheckTime: false);
     });
   }
 
-  void _performDiscovery() {
-    checkDateTime = DateTime.now().toUtc();
+  /// Computes what the (simulated) repository has to offer and updates
+  /// `printer-state-reasons`/the new-firmware attributes accordingly.
+  /// [recordCheckTime] additionally stamps [checkDateTime] to now — used
+  /// for the Simulation Control "instant feedback" path (§4.2/§6.3.2 don't
+  /// apply there since no Client actually asked), but skipped when this is
+  /// called after a real Check-For-New-Printer-Firmware request's delay,
+  /// since that request's receipt time was already recorded.
+  void _performDiscovery({bool recordCheckTime = true}) {
+    if (recordCheckTime) {
+      checkDateTime = DateTime.now().toUtc();
+    }
     _stateReasons
       ..remove(FwStateReason.newFirmwareAvailable)
       ..remove(FwStateReason.firmwareRepositoryUnreachable)
@@ -594,7 +621,6 @@ class PrinterEngine extends ChangeNotifier {
       IppAttribute(FwDescriptionAttr.firmwareRepositoryUriSupported, const [
         IppUri('https://example.com/fw-sim/repository'),
       ]),
-      IppAttribute.single(FwStatusAttr.newFirmwareCheckDateTime, _checkDateTimeValue()),
       if (delayedUntilKeyword != null)
         IppAttribute.single(
           FwStatusAttr.newFirmwareDelayedUntil,
@@ -605,7 +631,7 @@ class PrinterEngine extends ChangeNotifier {
           FwStatusAttr.newFirmwareDelayedUntilDateTime,
           IppDateTime.fromDateTimeUtc(delayedUntilDateTime!),
         ),
-      ..._newFirmwareDataAttributes(),
+      ...newFirmwareStatusAttributes,
     ];
   }
 
@@ -615,7 +641,13 @@ class PrinterEngine extends ChangeNotifier {
   // exposing the fields themselves.
 
   void beginPipeline() {
-    _stateReasons.removeAll(FwPhaseReasons.allKeywords);
+    _stateReasons
+      ..removeAll(FwPhaseReasons.allKeywords)
+      ..remove(FwStateReason.firmwareUpdateSuccess)
+      ..remove(FwStateReason.firmwareUpdateFailure)
+      // Spans the whole Acquisition-through-Cleanup run — added once here,
+      // removed once in [concludeAfterCleanup].
+      ..add(FwStateReason.firmwareUpdateInProgress);
     printerState = 5; // stopped, per §5.2's body text
     isAcceptingJobs = false;
     currentPhase = null;
@@ -628,10 +660,18 @@ class PrinterEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setPhaseResult(FwPhase phase, String inProgressReason, String resultReason) {
+  void setPhaseResult(
+    FwPhase phase,
+    String inProgressReason,
+    String resultReason, {
+    required bool succeeded,
+  }) {
     _stateReasons
       ..remove(inProgressReason)
       ..add(resultReason);
+    if (!succeeded) {
+      _stateReasons.add(FwStateReason.firmwareUpdateFailure);
+    }
     notifyListeners();
   }
 
@@ -658,10 +698,30 @@ class PrinterEngine extends ChangeNotifier {
   @visibleForTesting
   Future<void> debugRunPipelineToCompletion() => _stateMachine.run();
 
-  void concludePipeline({required bool installedSuccessfully}) {
-    currentPhase = null;
-    printerState = 3; // idle
-    isAcceptingJobs = true;
+  /// Ends the pipeline as part of the same call that resolves the Cleanup
+  /// phase — deliberately one atomic engine mutation rather than two
+  /// separate ones (resolve Cleanup, then separately conclude), and
+  /// deliberately in this order: the new `printer-firmware-*` values (and
+  /// clearing `printer-new-firmware-*` back to no-value) are written
+  /// *before* `new-firmware-cleanup-in-progress` is removed from
+  /// `printer-state-reasons`. A Client/test polling until no `-in-progress`
+  /// reason remains must never be able to observe that "done" signal one
+  /// beat before the data it implies is actually in place — with both
+  /// mutations happening inside one synchronous function (rather than
+  /// across two, separated by whatever awaited the Cleanup phase's own
+  /// completion), there is no `notifyListeners()`/HTTP response that could
+  /// land in between the two.
+  ///
+  /// Also where `firmware-update-in-progress` (added once, back in
+  /// [beginPipeline]) finally gets removed, and where the consolidated
+  /// `firmware-update-success`/`-failure` keywords are decided:
+  /// `-success` lands (replacing every per-phase `-success` keyword
+  /// accumulated during the run) whenever Cleanup itself succeeds, and
+  /// `-failure` lands whenever it doesn't — independently of whether an
+  /// earlier phase already added `-failure` on its own via
+  /// [setPhaseResult], since both can legitimately describe the same run
+  /// (e.g. Installation failed, Recovery fixed it, Cleanup still succeeded).
+  void concludeAfterCleanup({required bool cleanupSucceeded, required bool installedSuccessfully}) {
     if (installedSuccessfully) {
       final info = _newFirmware;
       if (info != null) {
@@ -681,6 +741,33 @@ class PrinterEngine extends ChangeNotifier {
       checkDateTime = null;
       _stateReasons.remove(FwStateReason.newFirmwareAvailable);
     }
+
+    _stateReasons
+      ..remove(FwStateReason.newFirmwareCleanupInProgress)
+      ..add(
+        cleanupSucceeded
+            ? FwStateReason.newFirmwareCleanupSuccess
+            : FwStateReason.newFirmwareCleanupFailure,
+      );
+    if (!cleanupSucceeded) {
+      _stateReasons.add(FwStateReason.firmwareUpdateFailure);
+    }
+
+    // firmware-update-in-progress spans the whole run (see [beginPipeline])
+    // and ends here, regardless of outcome.
+    _stateReasons.remove(FwStateReason.firmwareUpdateInProgress);
+    if (cleanupSucceeded) {
+      // Replace the accumulated per-phase "-success" trail with the single
+      // consolidated signal, so the reasons set doesn't stay cluttered
+      // once the run is over.
+      _stateReasons
+        ..removeAll(FwPhaseReasons.allSuccessKeywords)
+        ..add(FwStateReason.firmwareUpdateSuccess);
+    }
+
+    currentPhase = null;
+    printerState = 3; // idle
+    isAcceptingJobs = true;
     notifyListeners();
   }
 

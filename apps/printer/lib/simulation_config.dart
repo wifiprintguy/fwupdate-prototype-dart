@@ -72,7 +72,7 @@ final class SimulationConfig {
       FwPhase.cleanup: PhaseOutcome.succeed,
       FwPhase.recovery: PhaseOutcome.succeed,
     },
-    this.phaseDuration = const Duration(seconds: 3),
+    this.phaseDuration = const Duration(seconds: 7),
     this.discoveryDelay = const Duration(seconds: 2),
     this.midUpdateOutageDuringActivation = Duration.zero,
     this.authEnforcement = AuthEnforcement.off,
@@ -96,7 +96,11 @@ final class SimulationConfig {
   final Map<FwPhase, PhaseOutcome> phaseOutcomes;
 
   /// How long each phase stays `-in-progress` before resolving (ignored for
-  /// phases configured to [PhaseOutcome.hang]).
+  /// phases configured to [PhaseOutcome.hang]). Defaults to 7s — long
+  /// enough (5-10s is the realistic range for an actual phase) that each
+  /// of Acquisition/Validation/Installation/Activation/Cleanup is visible
+  /// as its own step while polling, rather than the whole pipeline
+  /// finishing in a blink.
   final Duration phaseDuration;
 
   /// How long a Check-For-New-Printer-Firmware request takes to actually

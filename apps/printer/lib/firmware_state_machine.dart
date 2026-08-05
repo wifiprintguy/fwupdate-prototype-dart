@@ -64,11 +64,11 @@ class FirmwareStateMachine {
       if (myRun != _runId) return;
 
       if (outcome == PhaseOutcome.fail) {
-        engine.setPhaseResult(phase, reasons.inProgress, reasons.failure);
+        engine.setPhaseResult(phase, reasons.inProgress, reasons.failure, succeeded: false);
         failed = true;
         break;
       }
-      engine.setPhaseResult(phase, reasons.inProgress, reasons.success);
+      engine.setPhaseResult(phase, reasons.inProgress, reasons.success, succeeded: true);
     }
 
     if (failed) {
@@ -76,16 +76,28 @@ class FirmwareStateMachine {
       if (recovered == null) return; // hung or superseded
     }
 
-    final cleanedUp = await _runOnePhase(FwPhase.cleanup, myRun);
-    if (cleanedUp == null) return;
+    // Cleanup is handled inline rather than via [_runOnePhase]: its
+    // completion is also the moment the whole pipeline is considered done,
+    // so resolving it and concluding the pipeline must happen as one
+    // atomic engine call — see [PrinterEngine.concludeAfterCleanup].
+    final cleanupOutcome = engine.config.phaseOutcomes[FwPhase.cleanup] ?? PhaseOutcome.succeed;
+    engine.setPhaseInProgress(FwPhase.cleanup, FwPhaseReasons.cleanup.inProgress);
+    if (cleanupOutcome == PhaseOutcome.hang) return;
+
+    await Future.delayed(engine.config.phaseDuration);
+    if (myRun != _runId) return;
 
     _running = false;
-    engine.concludePipeline(installedSuccessfully: !failed);
+    engine.concludeAfterCleanup(
+      cleanupSucceeded: cleanupOutcome != PhaseOutcome.fail,
+      installedSuccessfully: !failed,
+    );
   }
 
-  /// Runs a single non-main-pipeline phase (Recovery or Cleanup) to
-  /// completion. Returns `true`/`false` for success/failure, or `null` if
-  /// the phase hung or this run was superseded before it resolved.
+  /// Runs the Recovery phase to completion (Cleanup is handled inline in
+  /// [run] instead — see the comment there). Returns `true`/`false` for
+  /// success/failure, or `null` if the phase hung or this run was
+  /// superseded before it resolved.
   Future<bool?> _runOnePhase(FwPhase phase, int myRun) async {
     final outcome = engine.config.phaseOutcomes[phase] ?? PhaseOutcome.succeed;
     final reasons = FwPhaseReasons.byPhase[phase]!;
@@ -96,7 +108,12 @@ class FirmwareStateMachine {
     if (myRun != _runId) return null;
 
     final succeeded = outcome != PhaseOutcome.fail;
-    engine.setPhaseResult(phase, reasons.inProgress, succeeded ? reasons.success : reasons.failure);
+    engine.setPhaseResult(
+      phase,
+      reasons.inProgress,
+      succeeded ? reasons.success : reasons.failure,
+      succeeded: succeeded,
+    );
     return succeeded;
   }
 }

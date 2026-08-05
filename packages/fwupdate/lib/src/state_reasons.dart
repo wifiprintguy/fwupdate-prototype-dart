@@ -12,9 +12,20 @@ enum FwPhase { discovery, acquisition, validation, installation, activation, cle
 /// One `printer-state-reasons` keyword, and (for phase keywords) which
 /// [FwPhase] and outcome it describes.
 abstract final class FwStateReason {
-  // §7.3.1-7.3.3, §7.3.4: conditions not tied to a specific phase outcome.
+  // §7.3.1-7.3.2: repository conditions.
   static const firmwareRepositoryAccessError = 'firmware-repository-access-error';
   static const firmwareRepositoryUnreachable = 'firmware-repository-unreachable';
+
+  // §7.3.3-7.3.5: the overall (not per-phase) status of the current/most
+  // recent Firmware update activity. `firmware-update-in-progress` spans
+  // the whole Acquisition-through-Cleanup run (added once at the start,
+  // removed once at the end); `-success`/`-failure` summarize the outcome
+  // once it's over — see [FwPhaseReasons.allSuccessKeywords] for why the
+  // per-phase `-success` keywords get swept away when `-success` lands.
+  static const firmwareUpdateFailure = 'firmware-update-failure';
+  static const firmwareUpdateInProgress = 'firmware-update-in-progress';
+  static const firmwareUpdateSuccess = 'firmware-update-success';
+
   static const newFirmwareInstallationDelayUntilSpecified =
       'new-firmware-installation-delay-until-specified';
   static const newFirmwareAvailable = 'new-firmware-available';
@@ -52,6 +63,9 @@ abstract final class FwStateReason {
   static const all = [
     firmwareRepositoryAccessError,
     firmwareRepositoryUnreachable,
+    firmwareUpdateFailure,
+    firmwareUpdateInProgress,
+    firmwareUpdateSuccess,
     newFirmwareInstallationDelayUntilSpecified,
     newFirmwareAvailable,
     newFirmwareAcquisitionFailure,
@@ -155,5 +169,19 @@ final class FwPhaseReasons {
     FwStateReason.newFirmwareRecoveryInProgress,
     FwStateReason.newFirmwareRecoverySuccess,
     FwStateReason.newFirmwareRecoveryFailure,
+  ];
+
+  /// Just the `-success` keyword from each phase — swept out of
+  /// `printer-state-reasons` in favor of the single consolidated
+  /// `firmware-update-success` once the whole pipeline finishes
+  /// successfully, so the reasons set doesn't stay cluttered with every
+  /// individual phase's history after the fact.
+  static const List<String> allSuccessKeywords = [
+    FwStateReason.newFirmwareAcquisitionSuccess,
+    FwStateReason.newFirmwareValidationSuccess,
+    FwStateReason.newFirmwareInstallationSuccess,
+    FwStateReason.newFirmwareActivationSuccess,
+    FwStateReason.newFirmwareCleanupSuccess,
+    FwStateReason.newFirmwareRecoverySuccess,
   ];
 }

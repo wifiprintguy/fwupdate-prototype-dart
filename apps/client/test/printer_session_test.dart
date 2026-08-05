@@ -46,6 +46,12 @@ void main() {
     expect(session.newFirmwareState, FwOutOfBandState.neverChecked);
   });
 
+  // Also exercises PrinterSession's "grace poll" behavior: the Printer
+  // advances check-date-time the instant it receives the request (see
+  // PrinterEngine, §6.3.2), well before its delayed discovery result is
+  // ready — so if the Client stopped polling as soon as check-date-time
+  // merely changed, it would never see the firmware data land at all, and
+  // this test would time out rather than fail with a clear assertion.
   test('checkForNewFirmware polls until the result is visible', () async {
     engine.updateConfig(
       (c) => c.copyWith(

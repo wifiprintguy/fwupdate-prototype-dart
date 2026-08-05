@@ -50,8 +50,20 @@ class PrinterSession extends ChangeNotifier {
   /// "the check I just asked for hasn't resolved yet" is to notice that
   /// `printer-new-firmware-check-date-time` hasn't changed since before the
   /// request. [_checkDateTimeBaseline] is that "before" snapshot.
+  ///
+  /// But per §6.3.2, check-date-time is when the Printer *attempted* the
+  /// check — a conformant Printer can (and this project's does) advance it
+  /// the instant the request arrives, before it has actually finished
+  /// reading the repository and updating the new-firmware-* data
+  /// attributes. So check-date-time changing only proves the attempt was
+  /// acknowledged, not that fresh data has landed yet. [_checkGracePolls]
+  /// keeps polling a few extra ticks past that point specifically to give
+  /// slower-arriving data a chance to show up, rather than stopping the
+  /// instant the timestamp moves.
   bool _awaitingCheckResult = false;
   String? _checkDateTimeBaseline;
+  static const _checkGracePollCount = 3;
+  int? _checkGracePollsRemaining;
 
   final List<ClientEventLogEntry> _eventLog = [];
   List<ClientEventLogEntry> get eventLog => List.unmodifiable(_eventLog);
@@ -146,6 +158,7 @@ class PrinterSession extends ChangeNotifier {
     _notify();
     try {
       _checkDateTimeBaseline = _attrs[FwStatusAttr.newFirmwareCheckDateTime]?.value.toString();
+      _checkGracePollsRemaining = null;
       final request = buildCheckForNewPrinterFirmwareRequest(
         printerUri: printerUri.toString(),
         requestId: _nextRequestId++,
@@ -196,6 +209,7 @@ class PrinterSession extends ChangeNotifier {
   void stopPolling() {
     _pollTimer?.cancel();
     _pollTimer = null;
+    _checkGracePollsRemaining = null;
     _notify();
   }
 
@@ -215,10 +229,16 @@ class PrinterSession extends ChangeNotifier {
             .toString();
         if (currentCheckDateTime != _checkDateTimeBaseline) {
           _awaitingCheckResult = false;
+          _checkGracePollsRemaining = _checkGracePollCount;
         }
       }
       if (!_awaitingCheckResult && !_hasActivePhaseOrPendingCheck) {
-        stopPolling();
+        final grace = _checkGracePollsRemaining;
+        if (grace == null || grace <= 0) {
+          stopPolling();
+        } else {
+          _checkGracePollsRemaining = grace - 1;
+        }
       }
     } catch (e) {
       // Deliberately not fatal: FWUPDATE §4.4/§5.2 both note the Printer

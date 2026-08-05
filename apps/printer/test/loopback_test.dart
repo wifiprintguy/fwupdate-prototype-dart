@@ -147,9 +147,18 @@ void main() {
         ),
       );
       expect(ackResponse.isSuccessful, isTrue);
-      // Immediate response reflects pre-check (never-checked) state.
+      // check-date-time reflects the moment this request was received
+      // (§6.3.2) even though the ack arrives before discovery completes —
+      // so it's a real timestamp now, not still the pre-check no-value.
       expect(
         ackResponse.printerAttributes[FwStatusAttr.newFirmwareCheckDateTime]!.value,
+        isA<IppDateTime>(),
+      );
+      // But the firmware *data* attributes still reflect the old
+      // (never-checked) state, since the actual repository query hasn't
+      // resolved yet.
+      expect(
+        ackResponse.printerAttributes[FwStatusAttr.newFirmwareName]!.value,
         isA<IppNoValue>(),
       );
 
@@ -169,6 +178,46 @@ void main() {
             .map((v) => v.toString()),
         contains(FwStateReason.newFirmwareAvailable),
       );
+    });
+
+    test('check-date-time is pinned to request receipt, not discovery completion', () async {
+      engine.updateConfig(
+        (c) => c.copyWith(discoveryDelay: const Duration(milliseconds: 200)),
+      );
+      engine.resetToNeverChecked();
+
+      final beforeSend = DateTime.now().toUtc();
+      final ackResponse = await send(
+        buildCheckForNewPrinterFirmwareRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+        ),
+      );
+      final afterSend = DateTime.now().toUtc();
+      final ackCheckTime =
+          (ackResponse.printerAttributes[FwStatusAttr.newFirmwareCheckDateTime]!.value
+                  as IppDateTime)
+              .toDateTimeUtc();
+      expect(
+        ackCheckTime.isAfter(beforeSend.subtract(const Duration(seconds: 1))) &&
+            ackCheckTime.isBefore(afterSend.add(const Duration(seconds: 1))),
+        isTrue,
+        reason: 'check-date-time should be ~now, not delayed by discoveryDelay',
+      );
+
+      // Polling again before discoveryDelay elapses must report the exact
+      // same check-date-time — it was already recorded, not deferred.
+      final midFlight = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+        ),
+      );
+      final midFlightCheckTime =
+          (midFlight.printerAttributes[FwStatusAttr.newFirmwareCheckDateTime]!.value
+                  as IppDateTime)
+              .toDateTimeUtc();
+      expect(midFlightCheckTime, ackCheckTime);
     });
 
     test('reports firmware-repository-unreachable when configured', () async {
@@ -270,6 +319,52 @@ void main() {
       final unsupported = response.group(IppDelimiterTag.unsupportedAttributes);
       expect(unsupported?[FwOperationAttr.delayUpdateUntil]?.value, isA<IppUnsupported>());
     });
+
+    test(
+      'printer-firmware-* is already updated in the same response where no '
+      '-in-progress reason remains',
+      () async {
+        // This is exactly the ipptool-style polling loop a real Client
+        // conformance test uses: keep polling Get-Printer-Attributes, and
+        // the moment printer-state-reasons shows nothing still
+        // "-in-progress", trust that the update is done and check the
+        // installed-firmware attributes. It must never be possible to
+        // observe "no longer in progress" one poll before
+        // printer-firmware-string-version actually reflects the update.
+        await send(
+          buildUpdatePrinterFirmwareRequest(
+            printerUri: printerUri.toString(),
+            requestId: nextRequestId++,
+          ),
+        );
+
+        final deadline = DateTime.now().add(const Duration(seconds: 2));
+        while (DateTime.now().isBefore(deadline)) {
+          final response = await send(
+            buildGetPrinterAttributesRequest(
+              printerUri: printerUri.toString(),
+              requestId: nextRequestId++,
+            ),
+          );
+          final reasons = response.printerAttributes['printer-state-reasons']!.values
+              .map((v) => v.toString())
+              .toSet();
+          final stillInProgress = reasons.any((r) => r.endsWith('-in-progress'));
+          if (!stillInProgress) {
+            expect(
+              response.printerAttributes['printer-firmware-string-version']!.value.toString(),
+              '4.0.0',
+              reason:
+                  'printer-firmware-string-version must already be updated by the '
+                  'time no -in-progress reason remains in printer-state-reasons',
+            );
+            return;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 2));
+        }
+        fail('Pipeline never finished within the deadline');
+      },
+    );
   });
 
   group('Authorization', () {
