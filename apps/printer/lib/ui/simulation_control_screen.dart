@@ -24,21 +24,7 @@ class SimulationControlScreen extends StatelessWidget {
       children: [
         Text('Scenario presets', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
-        ...scenarioPresets.map(
-          (preset) => Card(
-            child: ListTile(
-              title: Text(preset.name),
-              subtitle: Text(preset.description),
-              trailing: FilledButton(
-                onPressed: () {
-                  preset.apply(engine);
-                  onScenarioApplied?.call();
-                },
-                child: const Text('Apply'),
-              ),
-            ),
-          ),
-        ),
+        _ScenarioPresetPicker(engine: engine, onScenarioApplied: onScenarioApplied),
         const SizedBox(height: 24),
         Text('Manual controls', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
@@ -61,6 +47,86 @@ class SimulationControlScreen extends StatelessWidget {
         _PolicySection(engine: engine, config: config),
         _DelaySection(engine: engine, config: config),
       ],
+    );
+  }
+}
+
+class _ScenarioPresetPicker extends StatefulWidget {
+  const _ScenarioPresetPicker({required this.engine, required this.onScenarioApplied});
+
+  final PrinterEngine engine;
+  final VoidCallback? onScenarioApplied;
+
+  @override
+  State<_ScenarioPresetPicker> createState() => _ScenarioPresetPickerState();
+}
+
+class _ScenarioPresetPickerState extends State<_ScenarioPresetPicker> {
+  static const _noneLabel = 'None';
+
+  ScenarioPreset? _selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: PopupMenuButton<ScenarioPreset?>(
+                    initialValue: _selected,
+                    onSelected: (preset) {
+                      setState(() => _selected = preset);
+                      // Apply immediately so Manual controls below preview the
+                      // scenario's settings before the user commits with Apply.
+                      if (preset != null) preset.apply(widget.engine);
+                    },
+                    itemBuilder: (context) => [
+                      const PopupMenuItem(value: null, child: Text(_noneLabel)),
+                      ...scenarioPresets.map(
+                        (preset) =>
+                            PopupMenuItem(value: preset, child: Text(preset.name)),
+                      ),
+                    ],
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        labelText: 'Scenario',
+                        border: OutlineInputBorder(),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(child: Text(_selected?.name ?? _noneLabel)),
+                          const Icon(Icons.arrow_drop_down),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton(
+                  onPressed: _selected == null
+                      ? null
+                      : () {
+                          _selected!.apply(widget.engine);
+                          widget.onScenarioApplied?.call();
+                        },
+                  child: const Text('Apply'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _selected?.description ??
+                  'Select a scenario to preview its settings in Manual controls below.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
