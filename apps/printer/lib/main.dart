@@ -221,7 +221,7 @@ class _PrinterHomePageState extends State<PrinterHomePage> {
     final address = '${widget.host}:${widget.port}';
     final pages = [
       PrinterHomeScreen(address: address),
-      const SimulationControlScreen(),
+      SimulationControlScreen(onScenarioApplied: () => setState(() => _tabIndex = 0)),
       const RequestLogScreen(),
     ];
 

@@ -10,7 +10,9 @@ import 'firmware_details_dialog.dart';
 /// The fault-injection control panel: named one-tap presets, plus every
 /// individual toggle from [SimulationConfig] for hand-tuning a scenario.
 class SimulationControlScreen extends StatelessWidget {
-  const SimulationControlScreen({super.key});
+  const SimulationControlScreen({super.key, this.onScenarioApplied});
+
+  final VoidCallback? onScenarioApplied;
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +30,10 @@ class SimulationControlScreen extends StatelessWidget {
               title: Text(preset.name),
               subtitle: Text(preset.description),
               trailing: FilledButton(
-                onPressed: () => preset.apply(engine),
+                onPressed: () {
+                  preset.apply(engine);
+                  onScenarioApplied?.call();
+                },
                 child: const Text('Apply'),
               ),
             ),
