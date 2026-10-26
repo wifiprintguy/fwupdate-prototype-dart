@@ -176,7 +176,7 @@ void main() {
       expect(
         followUp.printerAttributes['printer-state-reasons']!.values
             .map((v) => v.toString()),
-        contains(FwStateReason.newFirmwareAvailable),
+        contains(FwStateReason.firmwareUpdateAvailable),
       );
     });
 
@@ -262,6 +262,7 @@ void main() {
             urgency: NewFirmwareUrgency.bugfix,
           ),
           phaseDuration: const Duration(milliseconds: 10),
+          noticeDuration: Duration.zero,
         ),
       );
     });
@@ -338,7 +339,7 @@ void main() {
         );
         expect(
           attrs.printerAttributes['printer-state-reasons']!.values.map((v) => v.toString()),
-          isNot(contains(FwStateReason.newFirmwareAvailable)),
+          isNot(contains(FwStateReason.firmwareUpdateAvailable)),
         );
       },
     );
@@ -359,16 +360,43 @@ void main() {
       expect(unsupported?[FwOperationAttr.delayUpdateUntil]?.value, isA<IppUnsupported>());
     });
 
+    test('a delayed install is listed as firmware-update-pending until it starts', () async {
+      final response = await send(
+        buildUpdatePrinterFirmwareRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+          delayUpdateUntil: DelayUpdateUntil.indefinite,
+        ),
+      );
+      expect(response.isSuccessful, isTrue);
+      expect(
+        response.printerAttributes[FwStatusAttr.newFirmwareDelayedUntil]!.value.toString(),
+        DelayUpdateUntil.indefinite,
+      );
+
+      final attrs = await send(
+        buildGetPrinterAttributesRequest(
+          printerUri: printerUri.toString(),
+          requestId: nextRequestId++,
+        ),
+      );
+      final reasons = attrs.printerAttributes['printer-state-reasons']!.values
+          .map((v) => v.toString())
+          .toSet();
+      expect(reasons, contains(FwStateReason.firmwareUpdatePending));
+      expect(reasons, isNot(contains(FwStateReason.firmwareUpdateProcessing)));
+    });
+
     test(
       'printer-firmware-* is already updated in the same response where no '
-      '-in-progress reason remains',
+      'update-active reason remains',
       () async {
         // This is exactly the ipptool-style polling loop a real Client
         // conformance test uses: keep polling Get-Printer-Attributes, and
-        // the moment printer-state-reasons shows nothing still
-        // "-in-progress", trust that the update is done and check the
+        // the moment printer-state-reasons shows no pending/processing/
+        // phase keyword, trust that the update is done and check the
         // installed-firmware attributes. It must never be possible to
-        // observe "no longer in progress" one poll before
+        // observe "no longer active" one poll before
         // printer-firmware-string-version actually reflects the update.
         await send(
           buildUpdatePrinterFirmwareRequest(
@@ -388,14 +416,19 @@ void main() {
           final reasons = response.printerAttributes['printer-state-reasons']!.values
               .map((v) => v.toString())
               .toSet();
-          final stillInProgress = reasons.any((r) => r.endsWith('-in-progress'));
-          if (!stillInProgress) {
+          final stillActive = reasons.any(FwStateReason.updateActive.contains);
+          if (!stillActive) {
             expect(
               response.printerAttributes['printer-firmware-string-version']!.value.toString(),
               '4.0.0',
               reason:
                   'printer-firmware-string-version must already be updated by the '
-                  'time no -in-progress reason remains in printer-state-reasons',
+                  'time no update-active reason remains in printer-state-reasons',
+            );
+            expect(reasons, contains(FwStateReason.firmwareUpdateCompleted));
+            expect(
+              response.printerAttributes[FwStatusAttr.firmwareUpdateDateTime]!.value,
+              isA<IppDateTime>(),
             );
             return;
           }
@@ -477,6 +510,7 @@ void main() {
           ),
           midUpdateOutageDuringActivation: const Duration(milliseconds: 100),
           phaseDuration: const Duration(milliseconds: 10),
+          noticeDuration: Duration.zero,
         ),
       );
 
@@ -487,9 +521,9 @@ void main() {
         ),
       );
 
-      // Poll until the outage kicks in (Acquisition + Validation +
-      // Installation each take ~10ms before Activation's outage begins).
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // Wait for the outage to begin: each of the four phases takes ~10ms
+      // before the restart after Activation takes the Printer offline.
+      await Future<void>.delayed(const Duration(milliseconds: 70));
 
       await expectLater(
         send(

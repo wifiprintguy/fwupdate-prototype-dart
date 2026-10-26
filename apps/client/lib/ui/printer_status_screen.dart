@@ -113,6 +113,10 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
                     style: const TextStyle(decoration: TextDecoration.underline),
                   ),
                 ),
+              Text(
+                'printer-firmware-update-date-time: '
+                '${session.firmwareUpdateDateTime?.toLocal() ?? 'no-value'}',
+              ),
             ],
           ),
           const SizedBox(height: 4),
@@ -175,14 +179,13 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: Text(
-                        _progressSummary(session.stateReasons) ?? 'Waiting for progress…',
-                      ),
+                      child: Text(_progressSummary(session) ?? 'Waiting for progress…'),
                     ),
                   ],
                 ),
               ),
             ),
+          if (session.updateOutcome != null) _OutcomeCard(session: session),
           if (session.delayedUntilKeyword != null || session.delayedUntilDateTime != null)
             Card(
               child: ListTile(
@@ -231,7 +234,7 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
       ];
     }
     // printer-new-firmware-name's no-value is genuinely ambiguous on the
-    // wire (FWUPDATE §6.3.5): it means both "never checked" and "checked,
+    // wire (FWUPDATE §6.3.8): it means both "never checked" and "checked,
     // nothing available". Rather than guessing which one it means, show
     // printer-new-firmware-check-date-time itself — the attribute that
     // actually answers that question — the same way every other attribute
@@ -259,13 +262,53 @@ class _PrinterStatusScreenState extends State<PrinterStatusScreen> {
       Text('k-octets: ${info.kOctets}'),
       Text('patches: ${info.patches.join(', ')}'),
       if (info.infoUri != null) Text('info-uri: ${info.infoUri}'),
+      if (session.newFirmwareOfflineTime != null)
+        Text('offline-time: ${session.newFirmwareOfflineTime!.inSeconds}s'),
     ];
   }
 
-  String? _progressSummary(Set<String> reasons) {
-    final inProgress = reasons.where((r) => r.endsWith('-in-progress'));
-    if (inProgress.isEmpty) return null;
-    return 'In progress: ${inProgress.join(', ')}';
+  String? _progressSummary(PrinterSession session) {
+    final reason = session.activeUpdateReason;
+    if (reason == null) return null;
+    if (reason == FwStateReason.restarting) {
+      final offline = session.newFirmwareOfflineTime;
+      return offline == null || offline == Duration.zero
+          ? 'Printer restarting — it may be unreachable for a while'
+          : 'Printer restarting — expect it to be unreachable for about ${offline.inSeconds}s';
+    }
+    return 'Firmware update: $reason';
+  }
+}
+
+/// How the Printer's most recent Firmware Update ended, while it is still
+/// reporting `firmware-update-completed` or `firmware-update-aborted`
+/// (§4.6). An abort also names the phase that failed, when the Printer
+/// lists its `firmware-update-<phase>-failed` keyword.
+class _OutcomeCard extends StatelessWidget {
+  const _OutcomeCard({required this.session});
+
+  final PrinterSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = session.updateOutcome == FwStateReason.firmwareUpdateCompleted;
+    final failed = session.failedPhaseReasons;
+    return Card(
+      color: completed
+          ? Colors.green.withValues(alpha: 0.12)
+          : Theme.of(context).colorScheme.errorContainer,
+      child: ListTile(
+        leading: Icon(completed ? Icons.check_circle : Icons.error_outline),
+        title: Text(completed ? 'Firmware update completed' : 'Firmware update aborted'),
+        subtitle: completed
+            ? Text('Now running ${session.currentFirmwareVersion ?? 'the new Firmware'}')
+            : Text(
+                failed.isEmpty
+                    ? 'The previous Firmware was restored.'
+                    : 'Failed: ${failed.join(', ')}. The previous Firmware was restored.',
+              ),
+      ),
+    );
   }
 }
 

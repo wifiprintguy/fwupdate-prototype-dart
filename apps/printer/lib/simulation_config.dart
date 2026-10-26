@@ -4,7 +4,9 @@ import 'package:fwupdate/fwupdate.dart';
 /// Repository — FWUPDATE §7.3.1/§7.3.2 plus the ordinary success case.
 enum RepositoryState { reachable, unreachable, accessError }
 
-/// How one phase of the install pipeline (Figure 1) should resolve.
+/// How one phase of a Firmware Update (Figures 1 and 7) should resolve.
+/// [FwPhase.recovery] only honors [succeed] and [hang]: Figure 7 always ends
+/// it in "Aborted", so a `fail` outcome there is treated as [succeed].
 enum PhaseOutcome { succeed, fail, hang }
 
 /// How the Printer should react to Check-For-New-Printer-Firmware /
@@ -69,12 +71,14 @@ final class SimulationConfig {
       FwPhase.validation: PhaseOutcome.succeed,
       FwPhase.installation: PhaseOutcome.succeed,
       FwPhase.activation: PhaseOutcome.succeed,
-      FwPhase.cleanup: PhaseOutcome.succeed,
       FwPhase.recovery: PhaseOutcome.succeed,
     },
     this.phaseDuration = const Duration(seconds: 7),
     this.discoveryDelay = const Duration(seconds: 2),
+    this.noticeDuration = const Duration(seconds: 3),
+    this.outcomeRetention = const Duration(seconds: 60),
     this.midUpdateOutageDuringActivation = Duration.zero,
+    this.stopsAcceptingJobsDuringUpdate = true,
     this.authEnforcement = AuthEnforcement.off,
     this.operations = const OperationAvailability(),
     this.policy = NewFirmwarePolicy.directed,
@@ -91,7 +95,7 @@ final class SimulationConfig {
 
   final RepositoryState repositoryState;
 
-  /// Outcome for each phase of Figure 1's pipeline. [FwPhase.discovery] is
+  /// Outcome for each phase of a Firmware Update. [FwPhase.discovery] is
   /// governed by [repositoryState] instead and ignored here.
   final Map<FwPhase, PhaseOutcome> phaseOutcomes;
 
@@ -100,7 +104,8 @@ final class SimulationConfig {
   /// enough (5-10s is the realistic range for an actual phase) that each
   /// of Acquisition/Validation/Installation/Activation/Cleanup is visible
   /// as its own step while polling, rather than the whole pipeline
-  /// finishing in a blink.
+  /// finishing in a blink. Recovery (`firmware-update-aborting`) uses the
+  /// same duration.
   final Duration phaseDuration;
 
   /// How long a Check-For-New-Printer-Firmware request takes to actually
@@ -109,10 +114,32 @@ final class SimulationConfig {
   /// under test has to poll at least once to see the result.
   final Duration discoveryDelay;
 
-  /// If non-zero, the Printer becomes unreachable at the socket level (see
-  /// `IppServer.setSimulateUnreachable`) for this long partway through the
-  /// Activation phase, simulating a device reboot (FWUPDATE §4.4/§5.2 note).
+  /// How long the Printer announces something before it happens: how long
+  /// `firmware-update-pending` (§7.3.13) is listed before an immediate
+  /// update starts, and how long `restarting` (§7.3.17) is listed before a
+  /// simulated reboot takes the Printer offline. Long enough for a polling
+  /// Client to see each announcement at least once.
+  final Duration noticeDuration;
+
+  /// How long `firmware-update-completed` or `firmware-update-aborted`
+  /// stays listed after an update ends. §4.6 leaves this duration
+  /// "implementation specific". A new Update-Printer-Firmware or
+  /// Check-For-New-Printer-Firmware request also clears it.
+  final Duration outcomeRetention;
+
+  /// If non-zero, the Printer lists `restarting` once Activation finishes
+  /// and then becomes unreachable at the socket level (see
+  /// `IppServer.setSimulateUnreachable`) for this long, simulating a device
+  /// reboot (FWUPDATE §4.5 note, Figure 7). Also reported to Clients as
+  /// `printer-new-firmware-offline-time` (§6.3.9), which is 0 when this is
+  /// zero.
   final Duration midUpdateOutageDuringActivation;
+
+  /// Whether the Printer sets `printer-state` to 'stopped' and
+  /// `printer-is-accepting-jobs` to false while a Firmware Update runs.
+  /// §4.6 makes this conditional on the Printer being unable to accept Jobs
+  /// during the update.
+  final bool stopsAcceptingJobsDuringUpdate;
 
   final AuthEnforcement authEnforcement;
   final OperationAvailability operations;
@@ -124,7 +151,7 @@ final class SimulationConfig {
 
   /// If set, an Update-Printer-Firmware request naming this
   /// `delay-update-until` keyword is rejected as unsupported (Group 3 /
-  /// §5.2.1's reference to [STD92] §4.1.7) instead of being honored.
+  /// §5.2.3's reference to [STD92] §4.1.7) instead of being honored.
   final String? rejectedDelayUpdateUntilValue;
 
   SimulationConfig copyWith({
@@ -135,7 +162,10 @@ final class SimulationConfig {
     Map<FwPhase, PhaseOutcome>? phaseOutcomes,
     Duration? phaseDuration,
     Duration? discoveryDelay,
+    Duration? noticeDuration,
+    Duration? outcomeRetention,
     Duration? midUpdateOutageDuringActivation,
+    bool? stopsAcceptingJobsDuringUpdate,
     AuthEnforcement? authEnforcement,
     OperationAvailability? operations,
     String? policy,
@@ -149,8 +179,12 @@ final class SimulationConfig {
       phaseOutcomes: phaseOutcomes ?? this.phaseOutcomes,
       phaseDuration: phaseDuration ?? this.phaseDuration,
       discoveryDelay: discoveryDelay ?? this.discoveryDelay,
+      noticeDuration: noticeDuration ?? this.noticeDuration,
+      outcomeRetention: outcomeRetention ?? this.outcomeRetention,
       midUpdateOutageDuringActivation:
           midUpdateOutageDuringActivation ?? this.midUpdateOutageDuringActivation,
+      stopsAcceptingJobsDuringUpdate:
+          stopsAcceptingJobsDuringUpdate ?? this.stopsAcceptingJobsDuringUpdate,
       authEnforcement: authEnforcement ?? this.authEnforcement,
       operations: operations ?? this.operations,
       policy: policy ?? this.policy,

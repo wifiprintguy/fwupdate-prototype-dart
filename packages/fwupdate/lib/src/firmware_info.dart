@@ -6,7 +6,7 @@ import 'package:ipp/ipp.dart';
 import 'attributes.dart';
 
 /// A snapshot of the "new Firmware is available" attribute bundle
-/// (§6.3.5-§6.3.11, minus `printer-new-firmware-check-date-time` which the
+/// (§6.3.6-§6.3.13, minus `printer-new-firmware-check-date-time` which the
 /// Printer tracks separately — see [FwStatusAttr.newFirmwareDataGroup]).
 ///
 /// This is the Printer app's in-memory model of "what the simulated
@@ -31,7 +31,7 @@ final class FirmwareInfo {
   /// One of [NewFirmwareUrgency]'s keywords.
   final String urgency;
 
-  /// `octetString(MAX)` values (§6.3.11) — modeled as raw bytes since the
+  /// `octetString(MAX)` values (§6.3.13) — modeled as raw bytes since the
   /// spec leaves the version encoding to the manufacturer.
   final List<Uint8List> versions;
 
@@ -124,7 +124,7 @@ final class FirmwareInfo {
 }
 
 /// Which out-of-band state (if any) the `printer-new-firmware-*` data
-/// attributes (§6.3.5-6.3.11) are currently reporting.
+/// attributes (§6.3.6-6.3.13) are currently reporting.
 enum FwOutOfBandState {
   /// A real value is present — new Firmware is available.
   none,
@@ -148,7 +148,7 @@ enum FwOutOfBandState {
 }
 
 /// Builds the seven [FwStatusAttr.newFirmwareDataGroup] attributes as a
-/// single out-of-band value (`no-value` or `unknown`), per §6.3.5-6.3.11's
+/// single out-of-band value (`no-value` or `unknown`), per §6.3.6-6.3.13's
 /// identical out-of-band wording.
 List<IppAttribute> buildOutOfBandFirmwareDataAttributes(IppValue outOfBandValue) {
   assert(

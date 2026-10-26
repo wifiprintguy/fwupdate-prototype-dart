@@ -83,6 +83,31 @@ void main() {
     });
   });
 
+  group('printer-state-reasons keywords', () {
+    test('match the 17 keywords FWUPDATE §7.3 defines', () {
+      expect(FwStateReason.all.toSet(), hasLength(17));
+      expect(FwStateReason.all, contains('restarting'));
+      expect(
+        FwStateReason.all.where((k) => k != 'restarting'),
+        everyElement(anyOf(startsWith('firmware-update-'), startsWith('firmware-repository-'))),
+      );
+    });
+
+    test('every phase in Table 2 has an active and a -failed keyword', () {
+      for (final phase in FwPhaseReasons.pipeline) {
+        final reasons = FwPhaseReasons.byPhase[phase]!;
+        expect(reasons.failed, '${reasons.active}-failed');
+      }
+      expect(FwPhaseReasons.byPhase[FwPhase.recovery]!.active, 'firmware-update-aborting');
+      expect(FwPhaseReasons.byPhase[FwPhase.recovery]!.failed, isNull);
+    });
+
+    test('outcomes are never update-active', () {
+      expect(FwStateReason.updateActive.intersection(FwStateReason.outcomes), isEmpty);
+      expect(FwStateReason.all, containsAll(FwStateReason.updateActive));
+    });
+  });
+
   group('SimulatedRole', () {
     test('only Administrator/Operator are authorized', () {
       expect(SimulatedRole.administrator.isAuthorizedForFirmwareOperations, isTrue);

@@ -3,7 +3,7 @@ import 'package:ipp/ipp.dart';
 import 'attributes.dart';
 
 /// Thrown by [buildUpdatePrinterFirmwareRequest] if the caller tries to
-/// supply both delay operation attributes — FWUPDATE §4.4 states a Client
+/// supply both delay operation attributes — FWUPDATE §5.2.1 states a Client
 /// "MUST NOT supply both". This is a client-side guard so the Client app
 /// under test can't accidentally send a non-conformant request through this
 /// builder; the Printer app's dispatcher enforces the same rule
@@ -13,7 +13,7 @@ final class ConflictingDelayAttributesError extends ArgumentError {
   ConflictingDelayAttributesError()
     : super(
         'delay-update-until and delay-update-until-date-time are mutually '
-        'exclusive (FWUPDATE §4.4)',
+        'exclusive (FWUPDATE §5.2.1)',
       );
 }
 
@@ -56,7 +56,7 @@ IppMessage buildCheckForNewPrinterFirmwareRequest({
   );
 }
 
-/// Builds an Update-Printer-Firmware request (§5.2.1). At most one of
+/// Builds an Update-Printer-Firmware request (§5.2.2). At most one of
 /// [delayUpdateUntil] (a [DelayUpdateUntil] keyword) or
 /// [delayUpdateUntilDateTime] may be supplied.
 IppMessage buildUpdatePrinterFirmwareRequest({

@@ -29,7 +29,6 @@ const _allSucceed = {
   FwPhase.validation: PhaseOutcome.succeed,
   FwPhase.installation: PhaseOutcome.succeed,
   FwPhase.activation: PhaseOutcome.succeed,
-  FwPhase.cleanup: PhaseOutcome.succeed,
   FwPhase.recovery: PhaseOutcome.succeed,
 };
 
@@ -98,7 +97,7 @@ final List<ScenarioPreset> scenarioPresets = [
     name: 'Clock not set',
     description:
         'printer-current-time is unset, so printer-new-firmware-check-date-time reports '
-        'unknown even after checking (§6.3.2 note).',
+        'unknown even after checking (§6.3.3 note).',
     apply: (engine) {
       engine.resetToNeverChecked();
       engine.setClockSet(false);
@@ -109,7 +108,9 @@ final List<ScenarioPreset> scenarioPresets = [
   ),
   ScenarioPreset(
     name: 'Acquisition fails',
-    description: 'The Acquisition phase fails, Recovery runs and succeeds, then Cleanup runs.',
+    description:
+        'The Acquisition phase fails (firmware-update-acquisition-failed), Recovery runs '
+        '(firmware-update-aborting), and the update ends as firmware-update-aborted.',
     apply: (engine) {
       engine.resetToNeverChecked();
       engine.setClockSet(true);
@@ -123,10 +124,27 @@ final List<ScenarioPreset> scenarioPresets = [
     },
   ),
   ScenarioPreset(
-    name: 'Installation fails, recovery also fails',
+    name: 'Activation fails',
     description:
-        'The Installation phase fails and the subsequent Recovery attempt fails too — '
-        'the worst case a Client has to surface clearly.',
+        'Every phase up to Activation succeeds, then Activation fails — the latest point '
+        'an update can abort, after the new Firmware is already installed.',
+    apply: (engine) {
+      engine.resetToNeverChecked();
+      engine.setClockSet(true);
+      engine.replaceConfig(
+        SimulationConfig(
+          firmwareAvailable: true,
+          firmwareInfo: _securityFirmware,
+          phaseOutcomes: {..._allSucceed, FwPhase.activation: PhaseOutcome.fail},
+        ),
+      );
+    },
+  ),
+  ScenarioPreset(
+    name: 'Stuck aborting',
+    description:
+        'Installation fails and Recovery never finishes, so the Printer stays at '
+        'firmware-update-aborting — the worst case a Client has to surface clearly.',
     apply: (engine) {
       engine.resetToNeverChecked();
       engine.setClockSet(true);
@@ -137,7 +155,7 @@ final List<ScenarioPreset> scenarioPresets = [
           phaseOutcomes: {
             ..._allSucceed,
             FwPhase.installation: PhaseOutcome.fail,
-            FwPhase.recovery: PhaseOutcome.fail,
+            FwPhase.recovery: PhaseOutcome.hang,
           },
         ),
       );
@@ -146,8 +164,9 @@ final List<ScenarioPreset> scenarioPresets = [
   ScenarioPreset(
     name: 'Reboot mid-activation',
     description:
-        'The Printer goes dark at the socket level for 15s during Activation, simulating a '
-        'real device reboot (§4.4/§5.2 note) — the Client must treat this as transient.',
+        'After Activation the Printer lists restarting, then goes dark at the socket level '
+        'for 15s, simulating a real device reboot (§4.5 note, Figure 7). It also reports '
+        'printer-new-firmware-offline-time. The Client must treat the outage as transient.',
     apply: (engine) {
       engine.resetToNeverChecked();
       engine.setClockSet(true);
@@ -182,8 +201,7 @@ final List<ScenarioPreset> scenarioPresets = [
     name: 'Delayed install, indefinite',
     description:
         "A Client's delay-update-until=indefinite request is accepted and held pending — "
-        'the Printer reports new-firmware-installation-delay-until-specified until a new '
-        'request supersedes it.',
+        'the Printer lists firmware-update-pending until a new request supersedes it.',
     apply: (engine) {
       engine.resetToNeverChecked();
       engine.setClockSet(true);

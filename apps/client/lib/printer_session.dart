@@ -15,7 +15,7 @@ import 'simulated_identity.dart';
 /// conformance checklist from the README (e.g. §"Treats a mid-update
 /// connection failure as transient"): [_pollTick] keeps polling through
 /// transport errors instead of surfacing them as fatal, exactly because a
-/// real Printer can go dark mid-reboot per FWUPDATE §4.4/§5.2's note.
+/// real Printer can go dark mid-reboot per FWUPDATE §4.5's note.
 class PrinterSession extends ChangeNotifier {
   PrinterSession({
     required this.printerUri,
@@ -72,7 +72,7 @@ class PrinterSession extends ChangeNotifier {
   /// [_maybeAutoCheck]), which nobody clicked a button for — until polling
   /// for its result settles. Lets the UI show "checking" instead of
   /// `printer-new-firmware-name`'s ambiguous `no-value`, which per FWUPDATE
-  /// §6.3.5 means both "never checked" *and* "checked, nothing available"
+  /// §6.3.8 means both "never checked" *and* "checked, nothing available"
   /// on the wire and can't be told apart from that attribute alone.
   bool isCheckingForFirmware = false;
 
@@ -130,14 +130,14 @@ class PrinterSession extends ChangeNotifier {
     unawaited(checkForNewFirmware(silent: true));
   }
 
-  /// Unlike the install pipeline, FWUPDATE's Discovery phase has no
-  /// `-in-progress` `printer-state-reasons` keyword of its own (§7.3 only
-  /// defines that triple for the install phases) — so the only way to tell
+  /// Unlike the install phases, FWUPDATE's Discovery phase has no
+  /// `printer-state-reasons` keyword of its own (Table 2 only covers
+  /// Acquisition through Activation) — so the only way to tell
   /// "the check I just asked for hasn't resolved yet" is to notice that
   /// `printer-new-firmware-check-date-time` hasn't changed since before the
   /// request. [_checkDateTimeBaseline] is that "before" snapshot.
   ///
-  /// But per §6.3.2, check-date-time is when the Printer *attempted* the
+  /// But per §6.3.3, check-date-time is when the Printer *attempted* the
   /// check — a conformant Printer can (and this project's does) advance it
   /// the instant the request arrives, before it has actually finished
   /// reading the repository and updating the new-firmware-* data
@@ -185,6 +185,60 @@ class PrinterSession extends ChangeNotifier {
         : Uri.tryParse(value.toString());
   }
 
+  /// `printer-firmware-update-date-time` (§6.3.2). `null` covers both
+  /// `no-value` ("installed at manufacture") and a missing attribute.
+  DateTime? get firmwareUpdateDateTime {
+    final value = _attrs[FwStatusAttr.firmwareUpdateDateTime]?.value;
+    return value is IppDateTime ? value.toDateTimeUtc() : null;
+  }
+
+  /// `printer-new-firmware-offline-time` (§6.3.9): how long the Printer
+  /// expects to be unreachable during the update. `null` when it isn't
+  /// supported (§6.3.9: assume the Printer stays reachable) or reports
+  /// `no-value`/`unknown`.
+  Duration? get newFirmwareOfflineTime {
+    final value = _attrs[FwStatusAttr.newFirmwareOfflineTime]?.value;
+    return value is IppInteger ? Duration(seconds: value.value) : null;
+  }
+
+  /// The update-active keyword (§7.3) that best describes what the Printer
+  /// is doing right now, or `null` if no update is scheduled or running.
+  /// Prefers the specific phase over the umbrella `-processing` keyword.
+  String? get activeUpdateReason {
+    const precedence = [
+      FwStateReason.restarting,
+      FwStateReason.firmwareUpdateAborting,
+      FwStateReason.firmwareUpdateActivation,
+      FwStateReason.firmwareUpdateInstallation,
+      FwStateReason.firmwareUpdateValidation,
+      FwStateReason.firmwareUpdateAcquisition,
+      FwStateReason.firmwareUpdateProcessing,
+      FwStateReason.firmwareUpdatePending,
+    ];
+    final reasons = stateReasons;
+    for (final reason in precedence) {
+      if (reasons.contains(reason)) return reason;
+    }
+    return null;
+  }
+
+  /// `firmware-update-completed` or `firmware-update-aborted` if the
+  /// Printer is still reporting how its most recent update ended (§4.6).
+  String? get updateOutcome {
+    final reasons = stateReasons;
+    if (reasons.contains(FwStateReason.firmwareUpdateCompleted)) {
+      return FwStateReason.firmwareUpdateCompleted;
+    }
+    if (reasons.contains(FwStateReason.firmwareUpdateAborted)) {
+      return FwStateReason.firmwareUpdateAborted;
+    }
+    return null;
+  }
+
+  /// The `firmware-update-<phase>-failed` keywords explaining an abort.
+  Set<String> get failedPhaseReasons =>
+      stateReasons.intersection(FwStateReason.phaseFailures);
+
   FirmwareInfo? get newFirmware => FirmwareInfo.tryParse(_attrs);
   FwOutOfBandState get newFirmwareState => FwOutOfBandState.of(_attrs);
 
@@ -211,13 +265,10 @@ class PrinterSession extends ChangeNotifier {
     return ops.values.whereType<IppEnum>().any((e) => e.value == operationId);
   }
 
-  bool get _hasActivePhaseOrPendingCheck {
-    if (stateReasons.any((r) => r.endsWith('-in-progress'))) return true;
-    if (stateReasons.contains(FwStateReason.newFirmwareInstallationDelayUntilSpecified)) {
-      return true;
-    }
-    return false;
-  }
+  /// Whether an update is scheduled, about to start, or running — any of
+  /// the §7.3 keywords in [FwStateReason.updateActive].
+  bool get _hasActivePhaseOrPendingCheck =>
+      stateReasons.any(FwStateReason.updateActive.contains);
 
   // --- Actions -------------------------------------------------------
 
@@ -347,7 +398,7 @@ class PrinterSession extends ChangeNotifier {
         }
       }
     } catch (e) {
-      // Deliberately not fatal: FWUPDATE §4.4/§5.2 both note the Printer
+      // Deliberately not fatal: FWUPDATE §4.5 and Figure 7 note the Printer
       // can become temporarily unreachable mid-update (e.g. rebooting to
       // activate new Firmware) — a conformant Client keeps polling rather
       // than reporting the update as failed.

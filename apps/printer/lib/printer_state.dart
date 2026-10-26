@@ -18,7 +18,7 @@ import 'transaction_log_entry.dart';
 /// its behavior is entirely driven by [config] (settable live from the
 /// Simulation Control screen) rather than any real firmware/repository.
 ///
-/// Autonomous behavior (§4.6): when [SimulationConfig.policy] is
+/// Autonomous behavior (§4.8, Table 4): when [SimulationConfig.policy] is
 /// [NewFirmwarePolicy.auto] and a discovery run finds new Firmware, this
 /// engine starts the install pipeline itself, without waiting for an
 /// Update-Printer-Firmware request — matching what the "policy" attribute
@@ -29,6 +29,10 @@ import 'transaction_log_entry.dart';
 /// possible future refinement, not required to validate a Client's
 /// Triggered Autonomous Firmware Update handling, which is the model this
 /// project targets per FWUPDATE §4.1.3).
+///
+/// `printer-state-reasons` follows Figure 7 of the 2026-10-31 draft — see
+/// [FirmwareStateMachine] for the sequence and the hooks below for exactly
+/// which keywords each step adds and removes.
 class PrinterEngine extends ChangeNotifier {
   PrinterEngine({this.printerName = 'FWUPDATE Sim Printer', SimulationConfig? config}) {
     _config = config ?? const SimulationConfig();
@@ -72,7 +76,7 @@ class PrinterEngine extends ChangeNotifier {
   // how PWG 5100.13 defines these as 1setOf attributes — see
   // [CurrentFirmwareAttr]. In practice this project's UI only ever edits a
   // single component, so [setCurrentFirmwareVersion] collapses to a
-  // one-element list; a successful install (see [concludeAfterCleanup]) can
+  // one-element list; a successful install (see [concludeCompleted]) can
   // still carry over a multi-component identity if the "new" Firmware was
   // configured with one.
 
@@ -92,6 +96,11 @@ class PrinterEngine extends ChangeNotifier {
   /// of a placeholder — falls back to a dead `example.com` URL only before
   /// the server has actually started.
   Uri get currentFirmwareInfoUri => releaseNotesUri(currentFirmwareVersion);
+
+  /// `printer-firmware-update-date-time` (§6.3.2): when the running
+  /// Firmware was installed. `null` reports `no-value`, meaning "installed
+  /// at manufacture".
+  DateTime? firmwareUpdateDateTime;
 
   void setCurrentFirmwareVersion(String version) {
     currentFirmwareStringVersions = [version];
@@ -157,7 +166,7 @@ class PrinterEngine extends ChangeNotifier {
 
   /// Whether the simulated device clock is set. When false,
   /// `printer-new-firmware-check-date-time` always reports `unknown`, per
-  /// FWUPDATE §6.3.2's note about `printer-current-time` being unset.
+  /// FWUPDATE §6.3.3's note about `printer-current-time` being unset.
   bool clockSet = true;
 
   void setClockSet(bool value) {
@@ -187,7 +196,7 @@ class PrinterEngine extends ChangeNotifier {
             ? FwOutOfBandState.unknown
             : FwOutOfBandState.neverChecked);
 
-  /// The exact `printer-new-firmware-*` attributes (§6.3.2, §6.3.5-6.3.11)
+  /// The exact `printer-new-firmware-*` attributes (§6.3.3, §6.3.6-6.3.13)
   /// this engine would put on a Get-Printer-Attributes response right now,
   /// including their out-of-band state — exposed so the UI can render each
   /// one individually and stay truthful to the wire by construction,
@@ -200,6 +209,7 @@ class PrinterEngine extends ChangeNotifier {
   String? delayedUntilKeyword;
   DateTime? delayedUntilDateTime;
   Timer? _delayTimer;
+  Timer? _outcomeTimer;
   int _discoveryRunId = 0;
 
   // --- Request log ----------------------------------------------------
@@ -219,6 +229,8 @@ class PrinterEngine extends ChangeNotifier {
   void resetToNeverChecked() {
     _delayTimer?.cancel();
     _delayTimer = null;
+    _outcomeTimer?.cancel();
+    _outcomeTimer = null;
     _discoveryRunId++;
     _stateMachine.cancel();
     checkDateTime = null;
@@ -350,7 +362,11 @@ class PrinterEngine extends ChangeNotifier {
       return IppMessage.statusResponse(statusCode: authRejection, requestId: requestId);
     }
 
-    // §6.3.2: the check-date-time is when the Printer last *attempted* to
+    // A new check starts a fresh cycle, so the previous update's
+    // completed/aborted result (§4.6) stops being reported.
+    _clearOutcome();
+
+    // §6.3.3: the check-date-time is when the Printer last *attempted* to
     // check, which is now — the moment this request was received — even
     // though the actual repository query/result is simulated as taking
     // `discoveryDelay` longer. Record it before building the response so
@@ -390,7 +406,7 @@ class PrinterEngine extends ChangeNotifier {
     final delayDateTimeAttr = op[FwOperationAttr.delayUpdateUntilDateTime];
 
     if (delayKeywordAttr != null && delayDateTimeAttr != null) {
-      // FWUPDATE §4.4: a Client "MUST NOT supply both".
+      // FWUPDATE §5.2.1: a Client "MUST NOT supply both".
       return IppMessage.statusResponse(
         statusCode: IppStatusCode.clientErrorConflictingAttributes,
         requestId: requestId,
@@ -424,15 +440,16 @@ class PrinterEngine extends ChangeNotifier {
     }
 
     _delayTimer?.cancel();
-    _stateReasons.remove(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
 
+    // A delayed update is listed as `firmware-update-pending` for the whole
+    // wait (§5.2.1).
     if (delayDateTimeAttr != null && !delayDateTimeAttr.isOutOfBand) {
       final target = (delayDateTimeAttr.value as IppDateTime).toDateTimeUtc();
       final wait = target.difference(DateTime.now().toUtc());
       delayedUntilDateTime = target;
       delayedUntilKeyword = null;
       if (wait > Duration.zero) {
-        _stateReasons.add(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
+        markPending();
         _delayTimer = Timer(wait, _beginPipelineFromDelay);
       } else {
         _beginPipelineFromDelay();
@@ -441,7 +458,7 @@ class PrinterEngine extends ChangeNotifier {
       delayedUntilKeyword = delayKeyword;
       delayedUntilDateTime = null;
       final demoDelay = _demoDelayFor(delayKeyword);
-      _stateReasons.add(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
+      markPending();
       if (demoDelay != null) {
         _delayTimer = Timer(demoDelay, _beginPipelineFromDelay);
       }
@@ -490,7 +507,6 @@ class PrinterEngine extends ChangeNotifier {
   void _beginPipelineFromDelay() {
     delayedUntilKeyword = null;
     delayedUntilDateTime = null;
-    _stateReasons.remove(FwStateReason.newFirmwareInstallationDelayUntilSpecified);
     unawaited(_stateMachine.run());
     notifyListeners();
   }
@@ -509,7 +525,7 @@ class PrinterEngine extends ChangeNotifier {
   /// Computes what the (simulated) repository has to offer and updates
   /// `printer-state-reasons`/the new-firmware attributes accordingly.
   /// [recordCheckTime] additionally stamps [checkDateTime] to now — used
-  /// for the Simulation Control "instant feedback" path (§4.2/§6.3.2 don't
+  /// for the Simulation Control "instant feedback" path (§4.3/§6.3.3 don't
   /// apply there since no Client actually asked), but skipped when this is
   /// called after a real Check-For-New-Printer-Firmware request's delay,
   /// since that request's receipt time was already recorded.
@@ -517,8 +533,10 @@ class PrinterEngine extends ChangeNotifier {
     if (recordCheckTime) {
       checkDateTime = DateTime.now().toUtc();
     }
+    // §7.3.1, §7.3.2 and §7.3.9 are mutually exclusive: adding any one of
+    // them removes the other two.
     _stateReasons
-      ..remove(FwStateReason.newFirmwareAvailable)
+      ..remove(FwStateReason.firmwareUpdateAvailable)
       ..remove(FwStateReason.firmwareRepositoryUnreachable)
       ..remove(FwStateReason.firmwareRepositoryAccessError);
 
@@ -535,7 +553,7 @@ class PrinterEngine extends ChangeNotifier {
         if (config.firmwareAvailable && config.firmwareInfo != null) {
           _newFirmware = config.firmwareInfo;
           _newFirmwareOutOfBand = const IppNoValue();
-          _stateReasons.add(FwStateReason.newFirmwareAvailable);
+          _stateReasons.add(FwStateReason.firmwareUpdateAvailable);
           if (config.policy == NewFirmwarePolicy.auto && !_stateMachine.isRunning) {
             unawaited(_stateMachine.run());
           }
@@ -556,19 +574,28 @@ class PrinterEngine extends ChangeNotifier {
   List<IppAttribute> _newFirmwareDataAttributes() {
     final info = _newFirmware;
     if (info == null) return buildOutOfBandFirmwareDataAttributes(_newFirmwareOutOfBand);
+    // §6.3.9: how long this update would keep the Printer unreachable — the
+    // simulated restart outage, or 0 when no restart is configured.
+    final offlineTime = IppAttribute.single(
+      FwStatusAttr.newFirmwareOfflineTime,
+      IppInteger(config.midUpdateOutageDuringActivation.inSeconds),
+    );
     // Self-host the info-uri (see [releaseNotesUri]) unless the tester
     // explicitly set one via the Simulation Control edit dialog.
-    if (info.infoUri != null) return info.toAttributes();
+    if (info.infoUri != null) return [...info.toAttributes(), offlineTime];
     final version = info.stringVersions.isNotEmpty ? info.stringVersions.first : 'unknown';
-    return FirmwareInfo(
-      names: info.names,
-      patches: info.patches,
-      kOctets: info.kOctets,
-      stringVersions: info.stringVersions,
-      urgency: info.urgency,
-      versions: info.versions,
-      infoUri: releaseNotesUri(version),
-    ).toAttributes();
+    return [
+      ...FirmwareInfo(
+        names: info.names,
+        patches: info.patches,
+        kOctets: info.kOctets,
+        stringVersions: info.stringVersions,
+        urgency: info.urgency,
+        versions: info.versions,
+        infoUri: releaseNotesUri(version),
+      ).toAttributes(),
+      offlineTime,
+    ];
   }
 
   List<IppAttribute> _buildFullPrinterAttributes() {
@@ -591,6 +618,12 @@ class PrinterEngine extends ChangeNotifier {
       IppAttribute.single(
         FwStatusAttr.firmwareInfoUri,
         IppUri(currentFirmwareInfoUri.toString()),
+      ),
+      IppAttribute.single(
+        FwStatusAttr.firmwareUpdateDateTime,
+        firmwareUpdateDateTime == null
+            ? const IppNoValue()
+            : IppDateTime.fromDateTimeUtc(firmwareUpdateDateTime!),
       ),
       IppAttribute(CurrentFirmwareAttr.name, currentFirmwareNames.map(IppName.new).toList()),
       IppAttribute(
@@ -640,38 +673,56 @@ class PrinterEngine extends ChangeNotifier {
   // firmware_state_machine.dart, so they're public methods rather than
   // exposing the fields themselves.
 
-  void beginPipeline() {
+  /// Figure 7 "Firmware Update Pending": a new update is about to start
+  /// (or is scheduled for later). Also where the previous update's result
+  /// stops being reported, so each update's keywords describe only itself.
+  void markPending() {
+    _clearOutcome(notify: false);
+    _stateReasons.add(FwStateReason.firmwareUpdatePending);
+    notifyListeners();
+  }
+
+  /// Figure 7 "Firmware Update Processing": `firmware-update-processing`
+  /// replaces `firmware-update-pending` and stays listed through every
+  /// phase, including Recovery, until [concludeCompleted] or
+  /// [concludeAborted] replaces it.
+  void beginProcessing() {
     _stateReasons
-      ..removeAll(FwPhaseReasons.allKeywords)
-      ..remove(FwStateReason.firmwareUpdateSuccess)
-      ..remove(FwStateReason.firmwareUpdateFailure)
-      // Spans the whole Acquisition-through-Cleanup run — added once here,
-      // removed once in [concludeAfterCleanup].
-      ..add(FwStateReason.firmwareUpdateInProgress);
-    printerState = 5; // stopped, per §5.2's body text
-    isAcceptingJobs = false;
+      ..remove(FwStateReason.firmwareUpdatePending)
+      ..add(FwStateReason.firmwareUpdateProcessing);
+    if (config.stopsAcceptingJobsDuringUpdate) {
+      printerState = 5; // stopped (§4.6)
+      isAcceptingJobs = false;
+    }
     currentPhase = null;
     notifyListeners();
   }
 
-  void setPhaseInProgress(FwPhase phase, String inProgressReason) {
+  /// Lists [phase]'s keyword in place of whichever phase keyword came
+  /// before it, since Figure 7 shows one phase active at a time.
+  void enterPhase(FwPhase phase) {
+    _removeActivePhaseKeywords();
     currentPhase = phase;
-    _stateReasons.add(inProgressReason);
+    _stateReasons.add(FwPhaseReasons.byPhase[phase]!.active);
     notifyListeners();
   }
 
-  void setPhaseResult(
-    FwPhase phase,
-    String inProgressReason,
-    String resultReason, {
-    required bool succeeded,
-  }) {
+  /// Replaces [phase]'s keyword with its `-failed` keyword. The `-failed`
+  /// keyword stays listed alongside `firmware-update-aborting` and then
+  /// `firmware-update-aborted`, so a Client can tell which phase failed.
+  void failPhase(FwPhase phase) {
+    final reasons = FwPhaseReasons.byPhase[phase]!;
+    _stateReasons.remove(reasons.active);
+    if (reasons.failed != null) _stateReasons.add(reasons.failed!);
+    notifyListeners();
+  }
+
+  /// Figure 7 "Printer Restarting": `restarting` (§7.3.17) replaces
+  /// `firmware-update-activation` shortly before the simulated reboot.
+  void announceRestart() {
     _stateReasons
-      ..remove(inProgressReason)
-      ..add(resultReason);
-    if (!succeeded) {
-      _stateReasons.add(FwStateReason.firmwareUpdateFailure);
-    }
+      ..remove(FwStateReason.firmwareUpdateActivation)
+      ..add(FwStateReason.restarting);
     notifyListeners();
   }
 
@@ -698,91 +749,90 @@ class PrinterEngine extends ChangeNotifier {
   @visibleForTesting
   Future<void> debugRunPipelineToCompletion() => _stateMachine.run();
 
-  /// Ends the pipeline as part of the same call that resolves the Cleanup
-  /// phase — deliberately one atomic engine mutation rather than two
-  /// separate ones (resolve Cleanup, then separately conclude), and
-  /// deliberately in this order: the new `printer-firmware-*` values (and
-  /// clearing `printer-new-firmware-*` back to no-value) are written
-  /// *before* `new-firmware-cleanup-in-progress` is removed from
-  /// `printer-state-reasons`. A Client/test polling until no `-in-progress`
-  /// reason remains must never be able to observe that "done" signal one
-  /// beat before the data it implies is actually in place — with both
-  /// mutations happening inside one synchronous function (rather than
-  /// across two, separated by whatever awaited the Cleanup phase's own
-  /// completion), there is no `notifyListeners()`/HTTP response that could
-  /// land in between the two.
+  /// Figure 7 "FirmwareUpdateCompleted" (§4.6): the new Firmware becomes
+  /// the current Firmware, the Table 1 attributes go back to `no-value`,
+  /// and `firmware-update-completed` replaces `firmware-update-processing`.
   ///
-  /// Also where `firmware-update-in-progress` (added once, back in
-  /// [beginPipeline]) finally gets removed, and where the consolidated
-  /// `firmware-update-success`/`-failure` keywords are decided:
-  /// `-success` lands (replacing every per-phase `-success` keyword
-  /// accumulated during the run) whenever Cleanup itself succeeds, and
-  /// `-failure` lands whenever it doesn't — independently of whether an
-  /// earlier phase already added `-failure` on its own via
-  /// [setPhaseResult], since both can legitimately describe the same run
-  /// (e.g. Installation failed, Recovery fixed it, Cleanup still succeeded).
-  void concludeAfterCleanup({required bool cleanupSucceeded, required bool installedSuccessfully}) {
-    if (installedSuccessfully) {
-      final info = _newFirmware;
-      if (info != null) {
-        // The newly-installed Firmware's full identity becomes the new
-        // "currently installed" one — not just its version string.
-        // currentFirmwareInfoUri is derived from currentFirmwareVersion
-        // (see its getter), so this alone keeps it correct too.
-        if (info.names.isNotEmpty) currentFirmwareNames = List.of(info.names);
-        if (info.patches.isNotEmpty) currentFirmwarePatches = List.of(info.patches);
-        if (info.stringVersions.isNotEmpty) {
-          currentFirmwareStringVersions = List.of(info.stringVersions);
-        }
-        if (info.versions.isNotEmpty) currentFirmwareVersionBytes = List.of(info.versions);
+  /// This is deliberately one synchronous engine mutation, and the new
+  /// `printer-firmware-*` values are written *before* the update-active
+  /// keywords are removed. A Client polling until no update-active keyword
+  /// remains must never observe that "done" signal one beat before the
+  /// data it implies is actually in place.
+  void concludeCompleted() {
+    final info = _newFirmware;
+    if (info != null) {
+      // The newly-installed Firmware's full identity becomes the new
+      // "currently installed" one — not just its version string.
+      // currentFirmwareInfoUri is derived from currentFirmwareVersion
+      // (see its getter), so this alone keeps it correct too.
+      if (info.names.isNotEmpty) currentFirmwareNames = List.of(info.names);
+      if (info.patches.isNotEmpty) currentFirmwarePatches = List.of(info.patches);
+      if (info.stringVersions.isNotEmpty) {
+        currentFirmwareStringVersions = List.of(info.stringVersions);
       }
-      _newFirmware = null;
-      _newFirmwareOutOfBand = const IppNoValue();
-      checkDateTime = null;
-      _stateReasons.remove(FwStateReason.newFirmwareAvailable);
-
-      // Without this, SimulationConfig still says the (now-installed)
-      // Firmware is available, so the very next discovery — another
-      // Check-For-New-Printer-Firmware, any Simulation Control edit, or an
-      // `auto`-policy cycle — would immediately "rediscover" the exact
-      // same Firmware as newly available again via _performDiscovery().
-      // A real repository wouldn't keep offering what a Printer just
-      // installed, so neither should the simulated one.
-      _config = _config.copyWith(firmwareAvailable: false, clearFirmwareInfo: true);
+      if (info.versions.isNotEmpty) currentFirmwareVersionBytes = List.of(info.versions);
     }
+    firmwareUpdateDateTime = DateTime.now().toUtc();
+    _newFirmware = null;
+    _newFirmwareOutOfBand = const IppNoValue();
+    checkDateTime = null;
+    _stateReasons.remove(FwStateReason.firmwareUpdateAvailable);
 
+    // Without this, SimulationConfig still says the (now-installed)
+    // Firmware is available, so the very next discovery — another
+    // Check-For-New-Printer-Firmware, any Simulation Control edit, or an
+    // `auto`-policy cycle — would immediately "rediscover" the exact
+    // same Firmware as newly available again via _performDiscovery().
+    // A real repository wouldn't keep offering what a Printer just
+    // installed, so neither should the simulated one.
+    _config = _config.copyWith(firmwareAvailable: false, clearFirmwareInfo: true);
+
+    _conclude(FwStateReason.firmwareUpdateCompleted);
+  }
+
+  /// Figure 7 "FirmwareUpdateAborted" (§4.6): Recovery has restored the
+  /// previous Firmware, and `firmware-update-aborted` replaces
+  /// `firmware-update-processing`. The new Firmware stays available
+  /// (`firmware-update-available` stays listed) so a Client can retry.
+  void concludeAborted() => _conclude(FwStateReason.firmwareUpdateAborted);
+
+  void _conclude(String outcome) {
+    _removeActivePhaseKeywords();
     _stateReasons
-      ..remove(FwStateReason.newFirmwareCleanupInProgress)
-      ..add(
-        cleanupSucceeded
-            ? FwStateReason.newFirmwareCleanupSuccess
-            : FwStateReason.newFirmwareCleanupFailure,
-      );
-    if (!cleanupSucceeded) {
-      _stateReasons.add(FwStateReason.firmwareUpdateFailure);
-    }
-
-    // firmware-update-in-progress spans the whole run (see [beginPipeline])
-    // and ends here, regardless of outcome.
-    _stateReasons.remove(FwStateReason.firmwareUpdateInProgress);
-    if (cleanupSucceeded) {
-      // Replace the accumulated per-phase "-success" trail with the single
-      // consolidated signal, so the reasons set doesn't stay cluttered
-      // once the run is over.
-      _stateReasons
-        ..removeAll(FwPhaseReasons.allSuccessKeywords)
-        ..add(FwStateReason.firmwareUpdateSuccess);
-    }
-
+      ..remove(FwStateReason.firmwareUpdatePending)
+      ..remove(FwStateReason.firmwareUpdateProcessing)
+      ..add(outcome);
     currentPhase = null;
     printerState = 3; // idle
     isAcceptingJobs = true;
+
+    _outcomeTimer?.cancel();
+    _outcomeTimer = Timer(config.outcomeRetention, _clearOutcome);
     notifyListeners();
+  }
+
+  void _removeActivePhaseKeywords() {
+    for (final reasons in FwPhaseReasons.byPhase.values) {
+      _stateReasons.remove(reasons.active);
+    }
+    _stateReasons.remove(FwStateReason.restarting);
+  }
+
+  /// Stops reporting the previous update's result: `-completed` or
+  /// `-aborted`, plus any `-failed` keyword that explained the abort.
+  void _clearOutcome({bool notify = true}) {
+    _outcomeTimer?.cancel();
+    _outcomeTimer = null;
+    _stateReasons
+      ..removeAll(FwStateReason.outcomes)
+      ..removeAll(FwStateReason.phaseFailures);
+    if (notify) notifyListeners();
   }
 
   @override
   void dispose() {
     _delayTimer?.cancel();
+    _outcomeTimer?.cancel();
     _stateMachine.cancel();
     super.dispose();
   }

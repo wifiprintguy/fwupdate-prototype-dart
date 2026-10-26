@@ -32,7 +32,7 @@ class SimulationControlScreen extends StatelessWidget {
           child: SwitchListTile(
             title: const Text('Device clock is set'),
             subtitle: const Text(
-              'Off ⇒ printer-new-firmware-check-date-time always reports unknown (§6.3.2)',
+              'Off ⇒ printer-new-firmware-check-date-time always reports unknown (§6.3.3)',
             ),
             value: engine.clockSet,
             onChanged: engine.setClockSet,
@@ -266,22 +266,31 @@ class _PipelineSection extends StatelessWidget {
     FwPhase.validation,
     FwPhase.installation,
     FwPhase.activation,
-    FwPhase.cleanup,
     FwPhase.recovery,
   ];
+
+  /// Figure 7 never shows Recovery failing, so it only offers succeed/hang.
+  static List<PhaseOutcome> _outcomesFor(FwPhase phase) => phase == FwPhase.recovery
+      ? const [PhaseOutcome.succeed, PhaseOutcome.hang]
+      : PhaseOutcome.values;
 
   @override
   Widget build(BuildContext context) {
     return Card(
       child: ExpansionTile(
-        title: const Text('Install pipeline'),
+        title: const Text('Firmware Update phases'),
         children: [
           for (final phase in _phases)
             ListTile(
-              title: Text(phase.name),
+              title: Text(
+                phase == FwPhase.recovery ? 'recovery (only after a failure)' : phase.name,
+              ),
+              subtitle: Text(FwPhaseReasons.byPhase[phase]!.active),
               trailing: DropdownButton<PhaseOutcome>(
-                value: config.phaseOutcomes[phase] ?? PhaseOutcome.succeed,
-                items: PhaseOutcome.values
+                value: _outcomesFor(phase).contains(config.phaseOutcomes[phase])
+                    ? config.phaseOutcomes[phase]
+                    : PhaseOutcome.succeed,
+                items: _outcomesFor(phase)
                     .map((o) => DropdownMenuItem(value: o, child: Text(o.name)))
                     .toList(),
                 onChanged: (value) {
@@ -311,13 +320,38 @@ class _PipelineSection extends StatelessWidget {
                 engine.updateConfig((c) => c.copyWith(discoveryDelay: Duration(seconds: s))),
           ),
           _DurationSlider(
-            label: 'Mid-update outage during Activation (0 = disabled)',
+            label: 'Notice before an update starts or the Printer restarts',
+            seconds: config.noticeDuration.inSeconds,
+            min: 0,
+            max: 10,
+            onChanged: (s) =>
+                engine.updateConfig((c) => c.copyWith(noticeDuration: Duration(seconds: s))),
+          ),
+          _DurationSlider(
+            label: 'Restart outage after Activation (0 = no restart)',
             seconds: config.midUpdateOutageDuringActivation.inSeconds,
             min: 0,
             max: 30,
             onChanged: (s) => engine.updateConfig(
               (c) => c.copyWith(midUpdateOutageDuringActivation: Duration(seconds: s)),
             ),
+          ),
+          _DurationSlider(
+            label: 'How long completed/aborted stays listed',
+            seconds: config.outcomeRetention.inSeconds,
+            min: 5,
+            max: 300,
+            onChanged: (s) =>
+                engine.updateConfig((c) => c.copyWith(outcomeRetention: Duration(seconds: s))),
+          ),
+          SwitchListTile(
+            title: const Text('Stop accepting Jobs during an update'),
+            subtitle: const Text(
+              "printer-state 'stopped' and printer-is-accepting-jobs false while processing (§4.6)",
+            ),
+            value: config.stopsAcceptingJobsDuringUpdate,
+            onChanged: (v) =>
+                engine.updateConfig((c) => c.copyWith(stopsAcceptingJobsDuringUpdate: v)),
           ),
         ],
       ),
@@ -464,7 +498,7 @@ class _DelaySection extends StatelessWidget {
     return Card(
       child: ListTile(
         title: const Text('Reject this delay-update-until value'),
-        subtitle: const Text('Returned as unsupported (Group 3), per §5.2.1'),
+        subtitle: const Text('Returned as unsupported (Group 3), per §5.2.3'),
         trailing: DropdownButton<String>(
           value: config.rejectedDelayUpdateUntilValue ?? _none,
           items: [

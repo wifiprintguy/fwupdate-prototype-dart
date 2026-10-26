@@ -1,144 +1,139 @@
 /// New `printer-state-reasons` keywords defined by FWUPDATE §7.3, plus the
-/// phase groupings used to drive/read the Firmware Update Phases state
-/// machine from Figure 1 of the spec.
+/// phase groupings used to drive/read the Firmware Update state machine
+/// from Figure 1 ("Firmware Update Phases") and Figure 7 ("Firmware Update
+/// Phases and 'printer-state-reasons' keywords") of the spec.
 library;
 
-/// The six phases from Figure 1 that emit `-in-progress`/`-success`/
-/// `-failure` reason triples, in pipeline order. `discovery` is driven by
-/// Check-For-New-Printer-Firmware (§5.1); the rest by Update-Printer-Firmware
-/// (§5.2).
-enum FwPhase { discovery, acquisition, validation, installation, activation, cleanup, recovery }
+/// The phases from §2.4 and Figure 1, in pipeline order.
+///
+/// * [discovery] is driven by Check-For-New-Printer-Firmware (§5.1) and has
+///   no keyword of its own — its outcome is reported via
+///   `firmware-update-available` or one of the repository-error reasons.
+/// * [acquisition] through [activation] each report a
+///   `firmware-update-<phase>` keyword while running and a
+///   `firmware-update-<phase>-failed` keyword if they fail (Table 2).
+/// * [recovery] runs only after one of those four phases fails, restoring
+///   the previously installed Firmware. Figure 7 calls it the "Aborting
+///   Phase" and reports it with `firmware-update-aborting` (§7.3.4). It has
+///   no failure keyword: Figure 7 always ends it in "Aborted".
+enum FwPhase { discovery, acquisition, validation, installation, activation, recovery }
 
-/// One `printer-state-reasons` keyword, and (for phase keywords) which
-/// [FwPhase] and outcome it describes.
+/// One `printer-state-reasons` keyword from FWUPDATE §7.3.
 abstract final class FwStateReason {
-  // §7.3.1-7.3.2: repository conditions.
+  // §7.3.1-7.3.2: repository conditions, reported by the Discovery phase.
   static const firmwareRepositoryAccessError = 'firmware-repository-access-error';
   static const firmwareRepositoryUnreachable = 'firmware-repository-unreachable';
 
-  // §7.3.3-7.3.5: the overall (not per-phase) status of the current/most
-  // recent Firmware update activity. `firmware-update-in-progress` spans
-  // the whole Acquisition-through-Cleanup run (added once at the start,
-  // removed once at the end); `-success`/`-failure` summarize the outcome
-  // once it's over — see [FwPhaseReasons.allSuccessKeywords] for why the
-  // per-phase `-success` keywords get swept away when `-success` lands.
-  static const firmwareUpdateFailure = 'firmware-update-failure';
-  static const firmwareUpdateInProgress = 'firmware-update-in-progress';
-  static const firmwareUpdateSuccess = 'firmware-update-success';
+  // §7.3.3-7.3.4: the unsuccessful end of a Firmware Update.
+  static const firmwareUpdateAborted = 'firmware-update-aborted';
+  static const firmwareUpdateAborting = 'firmware-update-aborting';
 
-  static const newFirmwareInstallationDelayUntilSpecified =
-      'new-firmware-installation-delay-until-specified';
-  static const newFirmwareAvailable = 'new-firmware-available';
+  // §7.3.5-7.3.8, 7.3.11-7.3.12, 7.3.15-7.3.16: per-phase keywords (Table 2).
+  static const firmwareUpdateAcquisition = 'firmware-update-acquisition';
+  static const firmwareUpdateAcquisitionFailed = 'firmware-update-acquisition-failed';
+  static const firmwareUpdateActivation = 'firmware-update-activation';
+  static const firmwareUpdateActivationFailed = 'firmware-update-activation-failed';
+  static const firmwareUpdateInstallation = 'firmware-update-installation';
+  static const firmwareUpdateInstallationFailed = 'firmware-update-installation-failed';
+  static const firmwareUpdateValidation = 'firmware-update-validation';
+  static const firmwareUpdateValidationFailed = 'firmware-update-validation-failed';
 
-  // §7.3.5-7.3.7 Acquisition
-  static const newFirmwareAcquisitionFailure = 'new-firmware-acquisition-failure';
-  static const newFirmwareAcquisitionInProgress = 'new-firmware-acquisition-in-progress';
-  static const newFirmwareAcquisitionSuccess = 'new-firmware-acquisition-success';
+  // §7.3.9: new Firmware was discovered.
+  static const firmwareUpdateAvailable = 'firmware-update-available';
 
-  // §7.3.8-7.3.10 Activation
-  static const newFirmwareActivationFailure = 'new-firmware-activation-failure';
-  static const newFirmwareActivationInProgress = 'new-firmware-activation-in-progress';
-  static const newFirmwareActivationSuccess = 'new-firmware-activation-success';
+  // §7.3.10: the successful end of a Firmware Update.
+  static const firmwareUpdateCompleted = 'firmware-update-completed';
 
-  // §7.3.11-7.3.13 Cleanup
-  static const newFirmwareCleanupFailure = 'new-firmware-cleanup-failure';
-  static const newFirmwareCleanupInProgress = 'new-firmware-cleanup-in-progress';
-  static const newFirmwareCleanupSuccess = 'new-firmware-cleanup-success';
+  // §7.3.13: a Firmware Update will soon begin. Also listed for the whole
+  // wait of a delayed update (§5.2.1), and replaced by
+  // `firmware-update-processing` when the update starts (§4.6).
+  static const firmwareUpdatePending = 'firmware-update-pending';
 
-  // §7.3.14-7.3.16 Installation
-  static const newFirmwareInstallationFailure = 'new-firmware-installation-failure';
-  static const newFirmwareInstallationInProgress = 'new-firmware-installation-in-progress';
-  static const newFirmwareInstallationSuccess = 'new-firmware-installation-success';
+  // §7.3.14: a Firmware Update is running (spans every phase, including
+  // Recovery, until it is replaced by `-completed` or `-aborted`).
+  static const firmwareUpdateProcessing = 'firmware-update-processing';
 
-  // §7.3.17-7.3.19 Recovery
-  static const newFirmwareRecoveryFailure = 'new-firmware-recovery-failure';
-  static const newFirmwareRecoveryInProgress = 'new-firmware-recovery-in-progress';
-  static const newFirmwareRecoverySuccess = 'new-firmware-recovery-success';
-
-  // §7.3.20-7.3.22 Validation
-  static const newFirmwareValidationFailure = 'new-firmware-validation-failure';
-  static const newFirmwareValidationInProgress = 'new-firmware-validation-in-progress';
-  static const newFirmwareValidationSuccess = 'new-firmware-validation-success';
+  // §7.3.17: the Printer will soon restart and likely be unreachable.
+  static const restarting = 'restarting';
 
   static const all = [
     firmwareRepositoryAccessError,
     firmwareRepositoryUnreachable,
-    firmwareUpdateFailure,
-    firmwareUpdateInProgress,
-    firmwareUpdateSuccess,
-    newFirmwareInstallationDelayUntilSpecified,
-    newFirmwareAvailable,
-    newFirmwareAcquisitionFailure,
-    newFirmwareAcquisitionInProgress,
-    newFirmwareAcquisitionSuccess,
-    newFirmwareActivationFailure,
-    newFirmwareActivationInProgress,
-    newFirmwareActivationSuccess,
-    newFirmwareCleanupFailure,
-    newFirmwareCleanupInProgress,
-    newFirmwareCleanupSuccess,
-    newFirmwareInstallationFailure,
-    newFirmwareInstallationInProgress,
-    newFirmwareInstallationSuccess,
-    newFirmwareRecoveryFailure,
-    newFirmwareRecoveryInProgress,
-    newFirmwareRecoverySuccess,
-    newFirmwareValidationFailure,
-    newFirmwareValidationInProgress,
-    newFirmwareValidationSuccess,
+    firmwareUpdateAborted,
+    firmwareUpdateAborting,
+    firmwareUpdateAcquisition,
+    firmwareUpdateAcquisitionFailed,
+    firmwareUpdateActivation,
+    firmwareUpdateActivationFailed,
+    firmwareUpdateAvailable,
+    firmwareUpdateCompleted,
+    firmwareUpdateInstallation,
+    firmwareUpdateInstallationFailed,
+    firmwareUpdatePending,
+    firmwareUpdateProcessing,
+    firmwareUpdateValidation,
+    firmwareUpdateValidationFailed,
+    restarting,
   ];
+
+  /// Keywords that mean a Firmware Update is scheduled, about to start, or
+  /// running. A Client watching an update keeps polling while any of these
+  /// is listed, and can consider the update finished once none is.
+  static const updateActive = {
+    firmwareUpdatePending,
+    firmwareUpdateProcessing,
+    firmwareUpdateAcquisition,
+    firmwareUpdateValidation,
+    firmwareUpdateInstallation,
+    firmwareUpdateActivation,
+    firmwareUpdateAborting,
+    restarting,
+  };
+
+  /// The two keywords that report how the most recent Firmware Update
+  /// ended. Each is listed only for an implementation-specific time (§4.6).
+  static const outcomes = {firmwareUpdateCompleted, firmwareUpdateAborted};
+
+  /// Every `firmware-update-<phase>-failed` keyword.
+  static const phaseFailures = {
+    firmwareUpdateAcquisitionFailed,
+    firmwareUpdateValidationFailed,
+    firmwareUpdateInstallationFailed,
+    firmwareUpdateActivationFailed,
+  };
 }
 
-/// The `-in-progress`/`-success`/`-failure` keyword triple for one phase of
-/// Figure 1's install pipeline (Acquisition, Validation, Installation,
-/// Activation, Cleanup, Recovery — `discovery` has no triple of its own,
-/// see [FwStateReason.newFirmwareAvailable] and the repository-error
-/// reasons instead).
+/// The keywords reported for one phase of a Firmware Update (Table 2):
+/// [active] while the phase runs, and [failed] if it fails. [failed] is
+/// `null` for [FwPhase.recovery], which Figure 7 never shows failing.
 final class FwPhaseReasons {
-  const FwPhaseReasons({
-    required this.inProgress,
-    required this.success,
-    required this.failure,
-  });
+  const FwPhaseReasons({required this.active, this.failed});
 
-  final String inProgress;
-  final String success;
-  final String failure;
+  final String active;
+  final String? failed;
 
   static const FwPhaseReasons acquisition = FwPhaseReasons(
-    inProgress: FwStateReason.newFirmwareAcquisitionInProgress,
-    success: FwStateReason.newFirmwareAcquisitionSuccess,
-    failure: FwStateReason.newFirmwareAcquisitionFailure,
+    active: FwStateReason.firmwareUpdateAcquisition,
+    failed: FwStateReason.firmwareUpdateAcquisitionFailed,
   );
 
   static const FwPhaseReasons validation = FwPhaseReasons(
-    inProgress: FwStateReason.newFirmwareValidationInProgress,
-    success: FwStateReason.newFirmwareValidationSuccess,
-    failure: FwStateReason.newFirmwareValidationFailure,
+    active: FwStateReason.firmwareUpdateValidation,
+    failed: FwStateReason.firmwareUpdateValidationFailed,
   );
 
   static const FwPhaseReasons installation = FwPhaseReasons(
-    inProgress: FwStateReason.newFirmwareInstallationInProgress,
-    success: FwStateReason.newFirmwareInstallationSuccess,
-    failure: FwStateReason.newFirmwareInstallationFailure,
+    active: FwStateReason.firmwareUpdateInstallation,
+    failed: FwStateReason.firmwareUpdateInstallationFailed,
   );
 
   static const FwPhaseReasons activation = FwPhaseReasons(
-    inProgress: FwStateReason.newFirmwareActivationInProgress,
-    success: FwStateReason.newFirmwareActivationSuccess,
-    failure: FwStateReason.newFirmwareActivationFailure,
-  );
-
-  static const FwPhaseReasons cleanup = FwPhaseReasons(
-    inProgress: FwStateReason.newFirmwareCleanupInProgress,
-    success: FwStateReason.newFirmwareCleanupSuccess,
-    failure: FwStateReason.newFirmwareCleanupFailure,
+    active: FwStateReason.firmwareUpdateActivation,
+    failed: FwStateReason.firmwareUpdateActivationFailed,
   );
 
   static const FwPhaseReasons recovery = FwPhaseReasons(
-    inProgress: FwStateReason.newFirmwareRecoveryInProgress,
-    success: FwStateReason.newFirmwareRecoverySuccess,
-    failure: FwStateReason.newFirmwareRecoveryFailure,
+    active: FwStateReason.firmwareUpdateAborting,
   );
 
   static const Map<FwPhase, FwPhaseReasons> byPhase = {
@@ -146,42 +141,14 @@ final class FwPhaseReasons {
     FwPhase.validation: validation,
     FwPhase.installation: installation,
     FwPhase.activation: activation,
-    FwPhase.cleanup: cleanup,
     FwPhase.recovery: recovery,
   };
 
-  static const List<String> allKeywords = [
-    FwStateReason.newFirmwareAcquisitionInProgress,
-    FwStateReason.newFirmwareAcquisitionSuccess,
-    FwStateReason.newFirmwareAcquisitionFailure,
-    FwStateReason.newFirmwareValidationInProgress,
-    FwStateReason.newFirmwareValidationSuccess,
-    FwStateReason.newFirmwareValidationFailure,
-    FwStateReason.newFirmwareInstallationInProgress,
-    FwStateReason.newFirmwareInstallationSuccess,
-    FwStateReason.newFirmwareInstallationFailure,
-    FwStateReason.newFirmwareActivationInProgress,
-    FwStateReason.newFirmwareActivationSuccess,
-    FwStateReason.newFirmwareActivationFailure,
-    FwStateReason.newFirmwareCleanupInProgress,
-    FwStateReason.newFirmwareCleanupSuccess,
-    FwStateReason.newFirmwareCleanupFailure,
-    FwStateReason.newFirmwareRecoveryInProgress,
-    FwStateReason.newFirmwareRecoverySuccess,
-    FwStateReason.newFirmwareRecoveryFailure,
-  ];
-
-  /// Just the `-success` keyword from each phase — swept out of
-  /// `printer-state-reasons` in favor of the single consolidated
-  /// `firmware-update-success` once the whole pipeline finishes
-  /// successfully, so the reasons set doesn't stay cluttered with every
-  /// individual phase's history after the fact.
-  static const List<String> allSuccessKeywords = [
-    FwStateReason.newFirmwareAcquisitionSuccess,
-    FwStateReason.newFirmwareValidationSuccess,
-    FwStateReason.newFirmwareInstallationSuccess,
-    FwStateReason.newFirmwareActivationSuccess,
-    FwStateReason.newFirmwareCleanupSuccess,
-    FwStateReason.newFirmwareRecoverySuccess,
+  /// The four phases that make up the main install pipeline, in order.
+  static const List<FwPhase> pipeline = [
+    FwPhase.acquisition,
+    FwPhase.validation,
+    FwPhase.installation,
+    FwPhase.activation,
   ];
 }

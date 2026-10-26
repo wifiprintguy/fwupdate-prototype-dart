@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:fwupdate/fwupdate.dart';
 import 'package:ipp/ipp.dart';
 import 'package:provider/provider.dart';
 
@@ -80,6 +81,10 @@ class PrinterHomeScreen extends StatelessWidget {
                 'printer-firmware-patches: ${engine.currentFirmwarePatches.join(', ')}',
               ),
               SelectableText('printer-firmware-info-uri: ${engine.currentFirmwareInfoUri}'),
+              SelectableText(
+                'printer-firmware-update-date-time: '
+                '${engine.firmwareUpdateDateTime?.toLocal() ?? 'no-value'}',
+              ),
               const SizedBox(height: 4),
               Text(
                 'Edit this from the Simulate tab.',
@@ -98,7 +103,7 @@ class PrinterHomeScreen extends StatelessWidget {
         if (engine.currentPhase != null) ...[
           const SizedBox(height: 12),
           _SectionCard(
-            title: 'Install pipeline',
+            title: 'Firmware Update',
             child: Row(
               children: [
                 const SizedBox(
@@ -107,7 +112,7 @@ class PrinterHomeScreen extends StatelessWidget {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
                 const SizedBox(width: 12),
-                Text('Running: ${engine.currentPhase!.name}'),
+                Expanded(child: Text('Running: ${_phaseLabel(engine)}')),
               ],
             ),
           ),
@@ -128,7 +133,13 @@ class PrinterHomeScreen extends StatelessWidget {
   }
 }
 
-/// Renders every `printer-new-firmware-*` attribute (§6.3.2, §6.3.5-6.3.11)
+String _phaseLabel(PrinterEngine engine) {
+  if (engine.stateReasons.contains(FwStateReason.restarting)) return 'restarting';
+  final phase = engine.currentPhase!;
+  return phase == FwPhase.recovery ? 'recovery (aborting)' : phase.name;
+}
+
+/// Renders every `printer-new-firmware-*` attribute (§6.3.3, §6.3.6-6.3.13)
 /// individually and by its real IPP name, built directly from
 /// [PrinterEngine.newFirmwareStatusAttributes] — the exact list a
 /// Get-Printer-Attributes response would carry — so this can't drift from

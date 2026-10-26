@@ -90,7 +90,7 @@ void main() {
     await _waitUntil(() => session.newFirmware != null, timeout: const Duration(seconds: 2));
 
     expect(session.newFirmware!.stringVersions, ['9.9.0']);
-    expect(session.stateReasons, contains(FwStateReason.newFirmwareAvailable));
+    expect(session.stateReasons, contains(FwStateReason.firmwareUpdateAvailable));
   });
 
   test('requestUpdate drives a full install and the version bumps', () async {
@@ -103,6 +103,7 @@ void main() {
           urgency: NewFirmwareUrgency.bugfix,
         ),
         phaseDuration: const Duration(milliseconds: 10),
+        noticeDuration: Duration.zero,
       ),
     );
     await session.connect();
@@ -117,6 +118,51 @@ void main() {
     await _waitUntil(() => !session.isPolling, timeout: const Duration(seconds: 2));
 
     expect(session.newFirmware, isNull);
+    expect(session.updateOutcome, FwStateReason.firmwareUpdateCompleted);
+    expect(session.activeUpdateReason, isNull);
+    expect(session.firmwareUpdateDateTime, isNotNull);
+  });
+
+  test('keeps polling through a slow update and stops once it is aborted', () async {
+    engine.updateConfig(
+      (c) => c.copyWith(
+        firmwareAvailable: true,
+        firmwareInfo: FirmwareInfo.simple(
+          name: 'main-controller',
+          stringVersion: '9.9.3',
+          urgency: NewFirmwareUrgency.bugfix,
+        ),
+        // Longer than the poll interval, so polling would stop mid-update
+        // if the session missed any of the update-active keywords.
+        phaseDuration: const Duration(milliseconds: 60),
+        noticeDuration: const Duration(milliseconds: 60),
+        phaseOutcomes: {
+          ...c.phaseOutcomes,
+          FwPhase.validation: PhaseOutcome.fail,
+        },
+      ),
+    );
+    await session.connect();
+
+    await session.requestUpdate();
+
+    final seen = <String>{};
+    final deadline = DateTime.now().add(const Duration(seconds: 3));
+    while (session.isPolling && DateTime.now().isBefore(deadline)) {
+      final reason = session.activeUpdateReason;
+      if (reason != null) seen.add(reason);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    expect(session.isPolling, isFalse);
+    expect(seen, containsAll([
+      FwStateReason.firmwareUpdatePending,
+      FwStateReason.firmwareUpdateAcquisition,
+      FwStateReason.firmwareUpdateAborting,
+    ]));
+    expect(session.updateOutcome, FwStateReason.firmwareUpdateAborted);
+    expect(session.failedPhaseReasons, {FwStateReason.firmwareUpdateValidationFailed});
+    expect(session.currentFirmwareVersion, '1.0.0');
   });
 
   test('keeps polling (does not go fatal) through a mid-update outage', () async {
@@ -129,6 +175,7 @@ void main() {
           urgency: NewFirmwareUrgency.security,
         ),
         phaseDuration: const Duration(milliseconds: 10),
+        noticeDuration: Duration.zero,
         midUpdateOutageDuringActivation: const Duration(milliseconds: 80),
       ),
     );

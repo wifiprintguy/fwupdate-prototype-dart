@@ -1,6 +1,9 @@
 # fwupdate-prototype-dart
 
-Prototype implementation of [IPP Firmware Update Extensions v1.0](wd-ippfwupdate10-20260729.pdf) (FWUPDATE) in Dart/Flutter.
+Prototype implementation of [IPP Firmware Update Extensions v1.0](wd-ippfwupdate10-20261031.pdf) (FWUPDATE) in Dart/Flutter.
+
+This prototype tracks the 2026-10-31 working draft. Section numbers in this README and in
+the code refer to that draft.
 
 The project is two separate Flutter apps, one per role defined by the spec's Protocol Role
 Terminology (§2.3), sharing a set of plain-Dart packages:
@@ -24,9 +27,9 @@ Milestones (Set-Printer-Attributes, Get-Notifications, chaos mode, real TLS).
 
 ```
 packages/ipp       14 tests   — wire codec + HTTP transport (incl. ipp/ipps scheme handling)
-packages/fwupdate   6 tests   — attributes/operations/state-reasons vocabulary
-apps/printer       32 tests   — state machine + real end-to-end HTTP loopback
-apps/client        13 tests   — PrinterSession driven against a real PrinterEngine
+packages/fwupdate   9 tests   — attributes/operations/state-reasons vocabulary
+apps/printer       39 tests   — state machine + real end-to-end HTTP loopback
+apps/client        14 tests   — PrinterSession driven against a real PrinterEngine
 ```
 
 Beyond the original v1 milestones, real multi-device testing surfaced a round of hardening
@@ -110,7 +113,7 @@ apps/
   printer/                     # Printer app (desktop-first)
     lib/
       printer_state.dart       # PrinterEngine: live attribute values, dispatch, ChangeNotifier
-      firmware_state_machine.dart  # phase engine driving §4.1's Discovery→...→Cleanup/Recovery
+      firmware_state_machine.dart  # Firmware Update engine following Figure 7 (phases + keywords)
       simulation_config.dart   # every injectable fault, as one serializable config object
       scenario_presets.dart    # named bundles of SimulationConfig (see Fault Injection Catalog)
       transaction_log_entry.dart  # one recorded request/response, for the Request Log tab
@@ -188,12 +191,16 @@ All attributes from spec §6 and the new §7.1–7.3 values, specifically:
 - Printer description: `delay-update-until-supported`, `printer-new-firmware-policy-configured`,
   `printer-new-firmware-policy-supported`, `printer-firmware-repository-uri-configured`,
   `printer-firmware-repository-uri-supported` (§6.2.1–6.2.5)
-- Printer status: `printer-firmware-info-uri`, `printer-new-firmware-check-date-time`,
-  `printer-new-firmware-delayed-until(-date-time)`, `printer-new-firmware-info-uri`,
-  `printer-new-firmware-k-octets`, `-name`, `-patches`, `-string-version`, `-urgency`,
-  `-version` (§6.3.1–6.3.11)
+- Printer status: `printer-firmware-info-uri`, `printer-firmware-update-date-time`,
+  `printer-new-firmware-check-date-time`, `printer-new-firmware-delayed-until(-date-time)`,
+  `printer-new-firmware-info-uri`, `printer-new-firmware-k-octets`, `-name`,
+  `-offline-time`, `-patches`, `-string-version`, `-urgency`, `-version` (§6.3.1–6.3.13)
 - `ipp-features-supported` gains `'fwupdate'` (§7.1); `operations-supported` gains the two
-  new enum values (§7.2); `printer-state-reasons` gains all 22 keywords from §7.3.
+  new enum values (§7.2); `printer-state-reasons` gains all 17 keywords from §7.3.
+
+`printer-new-firmware-offline-time` reports the simulated restart outage in seconds, or 0 when
+no restart is configured. Like the rest of Table 1, it reports `no-value` or `unknown` when
+no new Firmware is known.
 
 Existing STD92 attributes needed to host the above: `printer-state`, `printer-state-reasons`,
 `printer-is-accepting-jobs`, `printer-current-time`, `printer-uri-supported`, plus the
@@ -202,7 +209,7 @@ attributes are defined to parallel (Table 1) — the Printer needs *both* the "c
 installed" and "newly available" firmware attribute families to make the before/after
 distinction visible in the Client UI.
 
-`Set-Printer-Attributes` / `Get-Printer-Supported-Values` [RFC 3380] (§4.5, §4.6) are **not**
+`Set-Printer-Attributes` / `Get-Printer-Supported-Values` [RFC 3380] (§4.7, §4.8) are **not**
 implemented in v1 — the Printer app's Simulation Control screen sets
 `printer-firmware-repository-uri-configured` and `printer-new-firmware-policy-configured`
 directly (as if a human walked up to the printer), rather than over IPP. Adding
@@ -228,35 +235,65 @@ TLS is out of scope for v1 (see Non-Goals) — everything runs over plain `_ipp.
 
 ## Printer App Design
 
-### Firmware phase state machine
+### Firmware Update state machine
 
-Drives directly from Figure 1 of the spec:
+Follows Figures 1 and 7 of the spec. Each box lists the `printer-state-reasons` keyword the
+Printer reports while in that state. Every state from Acquisition through Aborting also lists
+`firmware-update-processing`:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Discovery
-    Discovery --> Acquisition
+    [*] --> Available: Discovery finds new Firmware
+    Available --> Pending: Update-Printer-Firmware, or policy 'auto'
+    [*] --> Pending
+    Pending --> Acquisition
     Acquisition --> Validation
     Validation --> Installation
     Installation --> Activation
-    Activation --> Cleanup
-    Cleanup --> [*]
+    Activation --> Restarting: reboot configured
+    Acquisition --> Aborting: firmware-update-acquisition-failed
+    Validation --> Aborting: firmware-update-validation-failed
+    Installation --> Aborting: firmware-update-installation-failed
+    Activation --> Aborting: firmware-update-activation-failed
+    Activation --> Completed
+    Restarting --> Completed
+    Aborting --> Aborted
+    Completed --> [*]
+    Aborted --> [*]
 
-    Acquisition --> Recovery: failure
-    Validation --> Recovery: failure
-    Installation --> Recovery: failure
-    Activation --> Recovery: failure
-    Recovery --> Cleanup
+    Available: firmware-update-available
+    Pending: firmware-update-pending
+    Acquisition: firmware-update-acquisition
+    Validation: firmware-update-validation
+    Installation: firmware-update-installation
+    Activation: firmware-update-activation
+    Restarting: restarting
+    Aborting: firmware-update-aborting
+    Completed: firmware-update-completed
+    Aborted: firmware-update-aborted
 ```
 
-Each phase after Discovery emits the corresponding `printer-state-reasons` keyword triple
-(`-in-progress` → `-success` or `-failure`, §7.3.5–7.3.22) as it runs, and the engine holds
-in `-in-progress` for a configurable duration per phase so the Client's polling loop has
-something to observe. `Recovery` is only entered if the phase that failed is configured to
-fail; otherwise it's skipped exactly as the diagram shows.
+How the engine applies the keywords:
+
+- **Pending** is listed for a configurable notice period before an immediate update starts.
+  It is also listed for the whole wait of a delayed update (§5.2.1).
+- **Processing** replaces pending and stays listed through every phase, including Recovery.
+- **One phase keyword at a time.** Each phase's keyword replaces the previous one, and the
+  engine holds each phase for a configurable duration so a polling Client can observe it.
+- **A failed phase** swaps its keyword for its `-failed` keyword, and then Recovery runs with
+  `firmware-update-aborting`. Recovery is the §2.4 phase that restores the previous Firmware.
+  The `-failed` keyword stays listed through `-aborting` and `-aborted`.
+- **Restarting** replaces `firmware-update-activation` when a reboot outage is configured.
+  The Printer then drops connections for that long before concluding.
+- **Completed or aborted** replaces processing when the update ends. Either stays listed for
+  a configurable retention time, or until the next Check-For-New-Printer-Firmware or
+  Update-Printer-Firmware request. The `-failed` keywords clear along with `-aborted`.
+- **`firmware-update-available`** stays listed during the update and after an abort, because
+  the new Firmware is still available. It is removed only when the update completes.
+- **Cleanup** from earlier drafts is no longer a phase, so the engine has no step for it.
 
 Discovery itself is driven by `Check-For-New-Printer-Firmware` (§5.1) or by the printer's
-own autonomous policy (§4.6); the rest of the pipeline is driven by `Update-Printer-Firmware`
+own autonomous policy (§4.8); the rest of the update is driven by `Update-Printer-Firmware`
 (§5.2) or autonomously if `printer-new-firmware-policy-configured` is `'auto'`.
 
 ### Simulation Config
@@ -267,30 +304,38 @@ One object holds every injectable fault, editable live from Simulation Control:
   `string-version`, `patches`, `k-octets`, `urgency`, `support-uri`
 - **Repository reachability**: reachable / `firmware-repository-unreachable` /
   `firmware-repository-access-error`
-- **Clock state**: normal / unset (forces `unknown` per the §6.3.2 note)
+- **Clock state**: normal / unset (forces `unknown` per the §6.3.3 note)
 - **Never-checked**: force all `printer-new-firmware-*` back to `no-value`, as if the
   printer just booted
 - A successful install clears the simulated firmware *availability* itself (not just the
   runtime `printer-new-firmware-*` status attributes) — so a Client that checks again right
   after an install correctly sees "nothing new," instead of the just-installed firmware
   reappearing as newly available because the underlying simulated repository was never told
-- **Per-phase outcome** (Acquisition, Validation, Installation, Activation, Cleanup):
-  succeed / fail / hang (never completes, to test Client timeout handling)
-- **Per-phase duration**: seconds to remain `-in-progress` before resolving
-- **Mid-update unreachability**: simulate a reboot by refusing/dropping connections for N
-  seconds during Activation (per the spec's explicit note in §4.4/§5.2 that this can happen)
+- **Per-phase outcome** (Acquisition, Validation, Installation, Activation): succeed / fail /
+  hang (never completes, to test Client timeout handling). Recovery offers only succeed /
+  hang, because Figure 7 never shows it failing.
+- **Per-phase duration**: seconds each phase keyword stays listed before resolving
+- **Notice period**: how long `firmware-update-pending` and `restarting` are listed before the
+  update starts or the Printer goes offline
+- **Restart after Activation**: list `restarting`, then simulate a reboot by refusing/dropping
+  connections for N seconds (per the spec's note in §4.5 and Figure 7). Also reported as
+  `printer-new-firmware-offline-time`.
+- **Outcome retention**: how long `firmware-update-completed` / `-aborted` stays listed (§4.6
+  leaves this implementation specific)
+- **Stop accepting Jobs during an update**: whether `printer-state` goes to 'stopped' and
+  `printer-is-accepting-jobs` to false while processing (§4.6 makes this conditional)
 - **Auth enforcement**: off / require Operator-or-Administrator (§5.1, §5.2), returning
   `client-error-forbidden`, `client-error-not-authenticated`, or `client-error-not-authorized`
   depending on the simulated identity the Client sent (see Identity below)
 - **Delay handling**: honor `delay-update-until` / `delay-update-until-date-time` normally,
   or reject a specific `delay-update-until` keyword as unsupported (exercises the Group 3
-  unsupported-attributes path, §5.2.1)
+  unsupported-attributes path, §5.2.3)
 - **Conflicting-attributes check**: whether to enforce the MUST NOT-both rule for the two
-  delay attributes (§4.4), returning `client-error-conflicting-attributes`
+  delay attributes (§5.2.1), returning `client-error-conflicting-attributes`
 - **Operation availability**: let either new operation be entirely absent from
   `operations-supported`, to test a Client talking to a non-FWUPDATE printer
 - **Policy**: `printer-new-firmware-policy-configured` = `auto` / `check` / `directed` /
-  `download` (§4.6, Table 3) — controls whether the Printer starts phases on its own between
+  `download` (§4.8, Table 4) — controls whether the Printer starts phases on its own between
   Client requests
 - **Chaos mode** (stretch): truncate/corrupt the IPP response body to test Client robustness
   against non-conformant printers — flagged separately since it's testing beyond the spec's
@@ -309,11 +354,12 @@ offers named one-tap presets on top of the raw config (still editable afterward)
 | Repository access error | `firmware-repository-access-error` (reachable, download fails) |
 | Never checked | All `printer-new-firmware-*` at `no-value`, no state-reason present |
 | Clock not set | `printer-new-firmware-check-date-time` reports `unknown` |
-| Acquisition fails | Acquisition phase fails, Recovery runs, Cleanup succeeds |
-| Installation fails, no recovery configured | Installation fails, Recovery itself fails |
-| Reboot mid-activation | Printer goes unreachable for 20s during Activation |
+| Acquisition fails | Acquisition fails, Recovery runs, the update ends `firmware-update-aborted` |
+| Activation fails | Every phase succeeds up to Activation, which fails |
+| Stuck aborting | Installation fails and Recovery hangs at `firmware-update-aborting` |
+| Reboot mid-activation | Printer lists `restarting` after Activation, then goes unreachable for 15s |
 | Unauthorized Client | Auth enforcement on, Client sends End-User identity → `client-error-not-authorized` |
-| Delayed install, indefinite | Client requests `delay-update-until: indefinite`, Printer holds at `new-firmware-installation-delay-until-specified` |
+| Delayed install, indefinite | Client requests `delay-update-until: indefinite`, Printer holds at `firmware-update-pending` |
 | Operation not supported | Both new operations removed from `operations-supported` |
 
 ### Identity / role simulation
@@ -345,22 +391,25 @@ originally two separate tabs; merged because watching "New Firmware status" chan
 response to Check/Update is the whole point, and splitting them made that harder to see):
 
 - Current `printer-state` / `printer-is-accepting-jobs` / `printer-state-reasons`, and the
-  currently-installed firmware (PWG 5100.13 `printer-firmware-*` attributes).
+  currently-installed firmware (PWG 5100.13 `printer-firmware-*` attributes, plus
+  `printer-firmware-info-uri` and `printer-firmware-update-date-time`).
 - A **Check for new Firmware** button (also triggered automatically — see below) and, below
   it, "New Firmware status": while a check is outstanding this shows a "Checking for new
   Firmware…" indicator instead of attribute values; once resolved, it always leads with the
   real `printer-new-firmware-check-date-time` value. That attribute — not
   `printer-new-firmware-name`'s out-of-band state — is what's shown deliberately: per
-  §6.3.5, `printer-new-firmware-name` being `no-value` means both "never checked" *and*
+  §6.3.8, `printer-new-firmware-name` being `no-value` means both "never checked" *and*
   "checked, found nothing," and the two can't be told apart from that attribute alone.
   `printer-new-firmware-check-date-time` is what actually answers "did a check happen."
 - A compact "when to install" control (one dropdown for immediate / named delay / specific
   date-time, replacing three tall radio buttons) and an **Update Firmware** button, which
   lets the tester pick immediate / named delay (§6.1.1 keyword) / specific date-time
-  (§6.1.2), sends Update-Printer-Firmware, then polls and renders the live phase
-  (`-in-progress` → `-success`/`-failure`) as a progress indicator, including correctly
-  handling the printer going temporarily unreachable (must retry, not treat as a fatal
-  error, per §4.4's explicit note).
+  (§6.1.2), sends Update-Printer-Firmware, then polls and renders the live phase keyword as a
+  progress indicator. It keeps polling while any pending, processing, phase, aborting or
+  `restarting` keyword is listed. It treats the printer going temporarily unreachable as
+  transient, per §4.5's note, and uses `printer-new-firmware-offline-time` to say how long the
+  outage should last. When the update ends it shows a completed or aborted card, naming the
+  failed phase from its `-failed` keyword.
 
 ### Log tab
 
@@ -411,7 +460,9 @@ Derived from §8.2 plus the behavioral notes in §11:
       available"
 - [ ] Never sends both `delay-update-until` and `delay-update-until-date-time` together
 - [ ] Treats a mid-update connection failure as transient (keeps polling / retries) rather
-      than immediately reporting update failure
+      than immediately reporting update failure, especially after `restarting` is listed
+- [ ] Keeps watching an update until `firmware-update-completed` or `-aborted` appears, and
+      reports which phase failed from its `firmware-update-<phase>-failed` keyword
 - [ ] Displays `printer-firmware-info-uri` / `printer-new-firmware-info-uri` as clickable
       links adjacent to the relevant firmware info (§11 recommendation)
 - [ ] Correctly surfaces the three auth rejection codes with actionable messaging
@@ -423,7 +474,7 @@ Derived from §8.2 plus the behavioral notes in §11:
 
 ## Sequence diagram (Triggered Autonomous Firmware Update)
 
-Reproduces Figure 3 in terms of this project's two apps. The Check-For-New-Printer-Firmware
+Reproduces Figure 6 in terms of this project's two apps. The Check-For-New-Printer-Firmware
 step may be sent because the tester pressed the button, or automatically by the Client
 itself (see [Automatic status monitoring](#automatic-status-monitoring)) — the wire sequence
 is identical either way, which is exactly the point: a "normal UI" behaving well shouldn't
@@ -442,13 +493,13 @@ sequenceDiagram
     P-->>C: 200 OK (accepted, check runs async)
     loop poll until check-date-time advances
         C->>P: Get-Printer-Attributes
-        P-->>C: printer-state-reasons incl. new-firmware-available?
+        P-->>C: printer-state-reasons incl. firmware-update-available?
     end
     C->>P: Update-Printer-Firmware (delay-update-until?)
     P-->>C: 200 OK (accepted, phases run async)
-    loop poll until terminal state
+    loop poll until firmware-update-completed or -aborted
         C->>P: Get-Printer-Attributes
-        P-->>C: current phase + in-progress/success/failure
+        P-->>C: pending / processing + current phase keyword (or restarting)
     end
 ```
 

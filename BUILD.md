@@ -100,7 +100,7 @@ flutter build macos / linux / windows   # if you also want a desktop Client buil
 (cd apps/client && flutter test)
 ```
 
-All 65 tests currently pass across the four suites (14 + 6 + 32 + 13). `apps/printer`'s suite
+All 76 tests currently pass across the four suites (14 + 9 + 39 + 14). `apps/printer`'s suite
 includes a real end-to-end loopback test (a real `IppServer` talked to over real HTTP);
 `apps/client`'s suite drives a real `PrinterEngine` from the Printer app the same way, using
 the actual `DiscoveredPrinter.toPrinterUri()` code path (an `ipp://` URI, not a hand-written
