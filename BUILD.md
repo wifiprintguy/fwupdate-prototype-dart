@@ -6,9 +6,10 @@ to live in one git repo and reference each other via `path:` dependencies. See t
 
 ## Prerequisites
 
-- **Flutter SDK** — this project was built against Flutter 3.38.5 (stable channel), which
-  bundles Dart 3.10.4. Run `flutter --version` to check yours; anything reasonably close
-  should work.
+- **Flutter SDK** — this project is built against Flutter 3.47.8 (stable channel), which
+  bundles Dart 3.13.7. Run `flutter --version` to check yours. Xcode 27 needs at least this
+  Flutter version for macOS builds: older versions fail the FlutterMacOS architecture check
+  (see [Troubleshooting](#troubleshooting)).
 - **Platform toolchains**, only for the platforms you actually target:
   - **macOS/iOS** (Printer app on macOS; Client app on iOS/macOS): Xcode, plus
     [CocoaPods](https://guides.cocoapods.org/using/getting-started.html#installation)
@@ -122,6 +123,14 @@ a build error.
 - **Android Java/AGP version warning**: either point Flutter at a compatible JDK
   (`flutter config --jdk-dir=<path>`) or bump the AGP version in
   `apps/client/android/build.gradle` per the message Flutter prints.
+- **macOS build fails under Xcode 27 with "MACOSX_DEPLOYMENT_TARGET is set to 10.15"**: Xcode
+  27 supports macOS 12.0 and later only. Both apps' `macos/Podfile` and Runner project already
+  target 12.0, and the Podfile's `post_install` hook raises every pod to 12.0 too, since
+  Flutter's own FlutterMacOS pod still declares 10.15.
+- **macOS build fails with "FlutterMacOS ... does not contain architectures "arm64 x86_64""**:
+  Flutter versions before 3.47.8 check both architectures in one `lipo -verify_arch` call,
+  which Xcode 27's `lipo` rejects. Upgrade Flutter (`brew upgrade --cask flutter` if installed
+  via Homebrew).
 - **CocoaPods not installed**: `flutter build macos`/`ios` will stop with "CocoaPods not
   installed or not in valid state." Install it (see Prerequisites above) and re-run.
 - **Client can't reach a discovered Printer ("Unsupported scheme ipp")**: this was a real bug
